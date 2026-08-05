@@ -1,19 +1,11 @@
 import io
-import json
 import re
 import unicodedata
-from datetime import date, datetime
 from urllib.parse import quote
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-
-try:
-    from supabase import Client, create_client
-except ImportError:
-    Client = None
-    create_client = None
 
 
 # =========================================================
@@ -25,9 +17,6 @@ st.set_page_config(
     page_icon="🚛",
     layout="wide",
 )
-
-META_MCI = 90.0
-META_IMPRODUTIVIDADE = 10.0
 
 CONSULTORES = [
     "Não definido",
@@ -50,10 +39,13 @@ MAPA_CONSULTORES_UF = {
     "PI": "Oscar Barbosa",
     "RN": "Oscar Barbosa",
     "SE": "Oscar Barbosa",
+
     "SP": "Paulo Castro",
     "RJ": "Paulo Castro",
     "ES": "Paulo Castro",
+
     "MG": "Fábio Silva",
+
     "AC": "Fábio Silva*",
     "AM": "Fábio Silva*",
     "AP": "Fábio Silva*",
@@ -61,81 +53,16 @@ MAPA_CONSULTORES_UF = {
     "RO": "Fábio Silva*",
     "RR": "Fábio Silva*",
     "TO": "Fábio Silva*",
+
     "PR": "Roberto Rugel",
     "RS": "Marcos Bispo",
     "SC": "Marcos Bispo",
+
     "DF": "Gleci Nunes",
     "GO": "Gleci Nunes",
     "MT": "Gleci Nunes",
     "MS": "Gleci Nunes",
 }
-
-REGIOES_CONSULTORES = {
-    "Oscar Barbosa": "Nordeste",
-    "Paulo Castro": "Sudeste",
-    "Fábio Silva": "Minas Gerais",
-    "Fábio Silva*": "Norte",
-    "Marcos Bispo": "Rio Grande do Sul e Santa Catarina",
-    "Roberto Rugel": "Paraná",
-    "Gleci Nunes": "Centro-Oeste",
-    "Não definido": "Não definida",
-}
-
-
-# =========================================================
-# SUPABASE
-# =========================================================
-
-@st.cache_resource
-def obter_supabase():
-    if create_client is None:
-        return None
-
-    url = st.secrets.get("SUPABASE_URL", "")
-    chave = (
-        st.secrets.get("SUPABASE_SERVICE_KEY", "")
-        or st.secrets.get("SUPABASE_KEY", "")
-    )
-
-    if not url or not chave:
-        return None
-
-    return create_client(url, chave)
-
-
-supabase = obter_supabase()
-MODO_BANCO = supabase is not None
-
-
-def executar_em_lotes(registros, tamanho=400):
-    for inicio in range(0, len(registros), tamanho):
-        yield registros[inicio: inicio + tamanho]
-
-
-def buscar_todos(nome_tabela: str, colunas="*") -> list[dict]:
-    if not MODO_BANCO:
-        return []
-
-    resultado = []
-    inicio = 0
-    tamanho = 1000
-
-    while True:
-        resposta = (
-            supabase.table(nome_tabela)
-            .select(colunas)
-            .range(inicio, inicio + tamanho - 1)
-            .execute()
-        )
-        dados = resposta.data or []
-        resultado.extend(dados)
-
-        if len(dados) < tamanho:
-            break
-
-        inicio += tamanho
-
-    return resultado
 
 
 # =========================================================
@@ -156,19 +83,24 @@ def texto_limpo(valor) -> str:
 
 def normalizar_texto(valor) -> str:
     texto = texto_limpo(valor).upper()
+
     texto = unicodedata.normalize("NFKD", texto)
+
     texto = "".join(
         caractere
         for caractere in texto
         if not unicodedata.combining(caractere)
     )
+
     texto = re.sub(r"\s+", " ", texto)
+
     return texto.strip()
 
 
 def padronizar_uf(valor) -> str:
     uf = normalizar_texto(valor)
     uf = re.sub(r"[^A-Z]", "", uf)
+
     return uf[:2]
 
 
@@ -214,6 +146,7 @@ def extrair_primeiro_celular(valor) -> str:
 def padronizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = df.columns.astype(str).str.strip()
+
     return df
 
 
@@ -230,70 +163,17 @@ def limpar_colunas_texto(
     return df
 
 
-def contar_unicos(df: pd.DataFrame, coluna: str) -> int:
+def contar_unicos(
+    df: pd.DataFrame,
+    coluna: str,
+) -> int:
     if df is None or coluna not in df.columns:
         return 0
 
     serie = df[coluna].apply(texto_limpo)
     serie = serie[serie != ""]
+
     return int(serie.nunique())
-
-
-def valor_json_seguro(valor):
-    if pd.isna(valor):
-        return None
-    if isinstance(valor, (datetime, date, pd.Timestamp)):
-        return valor.isoformat()
-    if hasattr(valor, "item"):
-        try:
-            return valor.item()
-        except Exception:
-            pass
-    return valor
-
-
-def linha_para_json(linha: pd.Series) -> dict:
-    return {
-        str(chave): valor_json_seguro(valor)
-        for chave, valor in linha.to_dict().items()
-    }
-
-
-def formatar_percentual(valor: float) -> str:
-    return f"{valor:.2f}%".replace(".", ",")
-
-
-def normalizar_data(valor) -> str | None:
-    texto = texto_limpo(valor)
-    if not texto:
-        return None
-
-    convertido = pd.to_datetime(texto, dayfirst=True, errors="coerce")
-    if pd.isna(convertido):
-        return None
-
-    return convertido.date().isoformat()
-
-
-def detectar_data_base(df: pd.DataFrame) -> str | None:
-    candidatos = [
-        "Data",
-        "Data da Atividade",
-        "Data de Rota",
-        "Data Operacional",
-    ]
-
-    for coluna in candidatos:
-        if coluna in df.columns:
-            datas = [
-                normalizar_data(valor)
-                for valor in df[coluna]
-            ]
-            datas = [valor for valor in datas if valor]
-            if datas:
-                return pd.Series(datas).mode().iloc[0]
-
-    return None
 
 
 # =========================================================
@@ -326,7 +206,8 @@ def ler_csv_ofs(arquivo) -> pd.DataFrame:
 
             if len(df.columns) > 1:
                 df = padronizar_colunas(df)
-                return limpar_colunas_texto(
+
+                df = limpar_colunas_texto(
                     df,
                     [
                         "ID da Atividade",
@@ -343,6 +224,8 @@ def ler_csv_ofs(arquivo) -> pd.DataFrame:
                         "Recurso",
                     ],
                 )
+
+                return df
 
         except Exception as erro:
             ultimo_erro = erro
@@ -362,14 +245,17 @@ def ler_cadastro_oficinas(arquivo) -> pd.DataFrame:
             engine="odf",
             dtype=str,
         )
+
     elif nome.endswith(".xlsx"):
         df = pd.read_excel(
             io.BytesIO(conteudo),
             engine="openpyxl",
             dtype=str,
         )
+
     elif nome.endswith(".csv"):
         return ler_csv_ofs(arquivo)
+
     else:
         raise ValueError(
             "Formato não permitido. Use ODS, XLSX ou CSV."
@@ -393,6 +279,7 @@ def localizar_coluna(
 
     for possibilidade in possibilidades:
         chave = normalizar_texto(possibilidade)
+
         if chave in mapa:
             return mapa[chave]
 
@@ -422,10 +309,17 @@ def preparar_cadastro(
         df,
         ["ID", "ID Oficina", "Código", "Codigo"],
     )
+
     coluna_nome = localizar_coluna(
         df,
-        ["Nome Fantasia", "Oficina", "Nome da Oficina", "Nome"],
+        [
+            "Nome Fantasia",
+            "Oficina",
+            "Nome da Oficina",
+            "Nome",
+        ],
     )
+
     coluna_cidade = localizar_coluna(
         df,
         [
@@ -436,10 +330,17 @@ def preparar_cadastro(
             "Municipio",
         ],
     )
+
     coluna_uf = localizar_coluna(
         df,
-        ["UF-base", "UF Base", "UF", "Estado"],
+        [
+            "UF-base",
+            "UF Base",
+            "UF",
+            "Estado",
+        ],
     )
+
     coluna_contatos = localizar_coluna(
         df,
         [
@@ -451,10 +352,12 @@ def preparar_cadastro(
             "Celular",
         ],
     )
+
     coluna_whatsapp = localizar_coluna(
         df,
         ["WhatsApp", "Whatsapp", "Whats App"],
     )
+
     coluna_consultor = localizar_coluna(
         df,
         [
@@ -463,8 +366,17 @@ def preparar_cadastro(
             "Consultor Responsavel",
         ],
     )
-    coluna_prioridade = localizar_coluna(df, ["Prioridade"])
-    coluna_status = localizar_coluna(df, ["Ativa", "Ativa?", "Status"])
+
+    coluna_prioridade = localizar_coluna(
+        df,
+        ["Prioridade"],
+    )
+
+    coluna_status = localizar_coluna(
+        df,
+        ["Ativa", "Ativa?", "Status"],
+    )
+
     coluna_observacoes = localizar_coluna(
         df,
         [
@@ -481,9 +393,22 @@ def preparar_cadastro(
         )
 
     cadastro = pd.DataFrame(index=df.index)
-    cadastro["ID"] = serie_coluna(df, coluna_id)
-    cadastro["Oficina"] = serie_coluna(df, coluna_nome)
-    cadastro["Cidade-base"] = serie_coluna(df, coluna_cidade)
+
+    cadastro["ID"] = serie_coluna(
+        df,
+        coluna_id,
+    )
+
+    cadastro["Oficina"] = serie_coluna(
+        df,
+        coluna_nome,
+    )
+
+    cadastro["Cidade-base"] = serie_coluna(
+        df,
+        coluna_cidade,
+    )
+
     cadastro["UF-base"] = serie_coluna(
         df,
         coluna_uf,
@@ -495,14 +420,18 @@ def preparar_cadastro(
         .fillna("Não definido")
     )
 
-    cadastro["Consultor"] = serie_coluna(
+    consultor_importado = serie_coluna(
         df,
         coluna_consultor,
     )
+
+    cadastro["Consultor"] = consultor_importado
+
     cadastro.loc[
         ~cadastro["Consultor"].isin(CONSULTORES),
         "Consultor",
     ] = ""
+
     cadastro.loc[
         cadastro["Consultor"] == "",
         "Consultor",
@@ -523,16 +452,20 @@ def preparar_cadastro(
     ].apply(extrair_primeiro_celular)
 
     cadastro["WhatsApp"] = whatsapp_importado
+
     cadastro.loc[
         cadastro["WhatsApp"] == "",
         "WhatsApp",
     ] = whatsapp_extraido
 
-    cadastro["Prioridade"] = serie_coluna(
+    prioridade = serie_coluna(
         df,
         coluna_prioridade,
         "Normal",
     )
+
+    cadastro["Prioridade"] = prioridade
+
     cadastro.loc[
         ~cadastro["Prioridade"].isin(
             ["Alta", "Normal", "Baixa"]
@@ -540,16 +473,17 @@ def preparar_cadastro(
         "Prioridade",
     ] = "Normal"
 
-    status = serie_coluna(df, coluna_status, "Sim")
-    cadastro["Ativa"] = status.apply(
-        lambda valor: normalizar_texto(valor)
-        not in {"NAO", "N", "INATIVA", "INATIVO", "FALSE", "0"}
+    cadastro["Ativa"] = serie_coluna(
+        df,
+        coluna_status,
+        "Sim",
     )
 
     cadastro["Observações"] = serie_coluna(
         df,
         coluna_observacoes,
     )
+
     cadastro["Chave Oficina"] = cadastro[
         "Oficina"
     ].apply(normalizar_texto)
@@ -566,90 +500,6 @@ def preparar_cadastro(
     return cadastro.sort_values(
         "Oficina"
     ).reset_index(drop=True)
-
-
-def cadastro_para_supabase(cadastro: pd.DataFrame) -> list[dict]:
-    registros = []
-
-    for _, linha in cadastro.iterrows():
-        registros.append(
-            {
-                "chave_oficina": linha["Chave Oficina"],
-                "codigo_oficina": texto_limpo(linha.get("ID", "")) or None,
-                "nome_oficina": texto_limpo(linha["Oficina"]),
-                "cidade": texto_limpo(linha["Cidade-base"]) or None,
-                "uf": texto_limpo(linha["UF-base"]) or None,
-                "consultor": texto_limpo(linha["Consultor"]) or "Não definido",
-                "whatsapp": limpar_telefone(linha["WhatsApp"]) or None,
-                "prioridade": texto_limpo(linha["Prioridade"]) or "Normal",
-                "ativa": bool(linha["Ativa"]),
-                "observacoes": texto_limpo(linha["Observações"]) or None,
-                "atualizado_em": datetime.now().isoformat(),
-            }
-        )
-
-    return registros
-
-
-def salvar_cadastro_supabase(cadastro: pd.DataFrame):
-    registros = cadastro_para_supabase(cadastro)
-
-    for lote in executar_em_lotes(registros):
-        (
-            supabase.table("oficinas")
-            .upsert(lote, on_conflict="chave_oficina")
-            .execute()
-        )
-
-
-def carregar_cadastro_supabase() -> pd.DataFrame:
-    dados = buscar_todos("oficinas")
-
-    if not dados:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(dados)
-    renomear = {
-        "codigo_oficina": "ID",
-        "nome_oficina": "Oficina",
-        "cidade": "Cidade-base",
-        "uf": "UF-base",
-        "consultor": "Consultor",
-        "whatsapp": "WhatsApp",
-        "prioridade": "Prioridade",
-        "ativa": "Ativa",
-        "observacoes": "Observações",
-        "chave_oficina": "Chave Oficina",
-    }
-    df = df.rename(columns=renomear)
-
-    for coluna in renomear.values():
-        if coluna not in df.columns:
-            df[coluna] = ""
-
-    df["Consultor automático"] = (
-        df["UF-base"]
-        .map(MAPA_CONSULTORES_UF)
-        .fillna("Não definido")
-    )
-    df["Contatos originais"] = ""
-
-    return df[
-        [
-            "ID",
-            "Oficina",
-            "Cidade-base",
-            "UF-base",
-            "Consultor automático",
-            "Consultor",
-            "Contatos originais",
-            "WhatsApp",
-            "Prioridade",
-            "Ativa",
-            "Observações",
-            "Chave Oficina",
-        ]
-    ].sort_values("Oficina").reset_index(drop=True)
 
 
 # =========================================================
@@ -678,36 +528,39 @@ def enriquecer_com_cadastro(
         "Prioridade",
     ]
 
-    disponiveis = [
-        coluna for coluna in colunas
-        if coluna in cadastro.columns
-    ]
-
     resultado = resultado.merge(
-        cadastro[disponiveis].drop_duplicates(
+        cadastro[colunas].drop_duplicates(
             subset=["Chave Oficina"]
         ),
         on="Chave Oficina",
         how="left",
     )
 
-    for coluna, padrao in {
-        "Consultor": "Não definido",
-        "Cidade-base": "",
-        "UF-base": "",
-        "WhatsApp": "",
-        "Prioridade": "Normal",
-    }.items():
-        if coluna not in resultado.columns:
-            resultado[coluna] = padrao
-        else:
-            resultado[coluna] = resultado[coluna].fillna(padrao)
+    resultado["Consultor"] = resultado[
+        "Consultor"
+    ].fillna("Não definido")
+
+    resultado["Cidade-base"] = resultado[
+        "Cidade-base"
+    ].fillna("")
+
+    resultado["UF-base"] = resultado[
+        "UF-base"
+    ].fillna("")
+
+    resultado["WhatsApp"] = resultado[
+        "WhatsApp"
+    ].fillna("")
+
+    resultado["Prioridade"] = resultado[
+        "Prioridade"
+    ].fillna("Normal")
 
     return resultado
 
 
 # =========================================================
-# CONCILIAÇÃO E INDICADORES
+# CONCILIAÇÃO
 # =========================================================
 
 def criar_chaves(df: pd.DataFrame) -> pd.DataFrame:
@@ -716,14 +569,17 @@ def criar_chaves(df: pd.DataFrame) -> pd.DataFrame:
     for coluna in ["Ticket Jira", "Placa", "OS"]:
         if coluna not in df.columns:
             df[coluna] = ""
+
         df[coluna] = df[coluna].apply(texto_limpo)
 
     df["Chave Ticket"] = df[
         "Ticket Jira"
     ].apply(normalizar_texto)
+
     df["Chave Placa"] = df[
         "Placa"
     ].apply(normalizar_texto)
+
     df["Chave OS"] = df[
         "OS"
     ].apply(normalizar_texto)
@@ -735,6 +591,7 @@ def criar_chaves(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     sem_ticket = df["Chave Ticket"] == ""
+
     df.loc[
         sem_ticket,
         "Chave Atendimento",
@@ -743,16 +600,6 @@ def criar_chaves(df: pd.DataFrame) -> pd.DataFrame:
         + df.loc[sem_ticket, "Chave OS"]
         + "|"
         + df.loc[sem_ticket, "Chave Placa"]
-    )
-
-    vazias = (
-        (df["Chave Ticket"] == "")
-        & (df["Chave OS"] == "")
-        & (df["Chave Placa"] == "")
-    )
-    df.loc[vazias, "Chave Atendimento"] = (
-        "LINHA|"
-        + df.loc[vazias].index.astype(str)
     )
 
     return df
@@ -765,9 +612,6 @@ def status_normalizado(valor) -> str:
 def status_executado(valor) -> bool:
     status = status_normalizado(valor)
 
-    if status_improdutivo(status):
-        return False
-
     termos = [
         "CONCLUID",
         "EXECUTAD",
@@ -775,11 +619,13 @@ def status_executado(valor) -> bool:
         "COMPLET",
         "REALIZAD",
     ]
+
     return any(termo in status for termo in termos)
 
 
 def status_improdutivo(valor) -> bool:
     status = status_normalizado(valor)
+
     termos = [
         "NAO CONCLUIDO",
         "NAO CONCLUIDA",
@@ -787,11 +633,14 @@ def status_improdutivo(valor) -> bool:
         "IMPRODUTIVA",
         "SEM SUCESSO",
     ]
+
     return any(termo in status for termo in termos)
 
 
 def status_cancelado(valor) -> bool:
-    return "CANCEL" in status_normalizado(valor)
+    status = status_normalizado(valor)
+
+    return "CANCEL" in status
 
 
 def conciliar_bases(
@@ -802,6 +651,7 @@ def conciliar_bases(
     resultado = criar_chaves(resultado)
 
     col_status = "Status da Atividade"
+
     if col_status not in resultado.columns:
         resultado[col_status] = ""
 
@@ -811,36 +661,22 @@ def conciliar_bases(
         .agg(
             Ticket_resultado=("Ticket Jira", "first"),
             Placa_resultado=("Placa", "first"),
-            OS_resultado=(
-                "OS",
-                lambda x: " | ".join(
-                    sorted(
-                        set(
-                            valor
-                            for valor in x
-                            if texto_limpo(valor)
-                        )
-                    )
-                ),
-            ),
+            OS_resultado=("OS", lambda x: " | ".join(
+                sorted(set(
+                    valor
+                    for valor in x
+                    if texto_limpo(valor)
+                ))
+            )),
             Oficina_resultado=("Oficina", "first"),
-            Estado_resultado=(
-                "Estado",
-                "first",
-            ) if "Estado" in resultado.columns else (
-                "Chave Atendimento",
-                lambda x: "",
-            ),
             Status_resultado=(
                 col_status,
                 lambda x: " | ".join(
-                    sorted(
-                        set(
-                            texto_limpo(valor)
-                            for valor in x
-                            if texto_limpo(valor)
-                        )
-                    )
+                    sorted(set(
+                        texto_limpo(valor)
+                        for valor in x
+                        if texto_limpo(valor)
+                    ))
                 ),
             ),
             Qtd_resultado=("Chave Atendimento", "size"),
@@ -848,35 +684,22 @@ def conciliar_bases(
         .reset_index()
     )
 
-    agregacoes_planejado = {
-        "Ticket_planejado": ("Ticket Jira", "first"),
-        "Placa_planejada": ("Placa", "first"),
-        "OS_planejada": (
-            "OS",
-            lambda x: " | ".join(
-                sorted(
-                    set(
-                        valor
-                        for valor in x
-                        if texto_limpo(valor)
-                    )
-                )
-            ),
-        ),
-        "Oficina_planejada": ("Oficina", "first"),
-        "Qtd_planejada": ("Chave Atendimento", "size"),
-    }
-
-    if "Estado" in planejado.columns:
-        agregacoes_planejado["Estado_planejado"] = (
-            "Estado",
-            "first",
-        )
-
     resumo_planejado = (
         planejado
         .groupby("Chave Atendimento", dropna=False)
-        .agg(**agregacoes_planejado)
+        .agg(
+            Ticket_planejado=("Ticket Jira", "first"),
+            Placa_planejada=("Placa", "first"),
+            OS_planejada=("OS", lambda x: " | ".join(
+                sorted(set(
+                    valor
+                    for valor in x
+                    if texto_limpo(valor)
+                ))
+            )),
+            Oficina_planejada=("Oficina", "first"),
+            Qtd_planejada=("Chave Atendimento", "size"),
+        )
         .reset_index()
     )
 
@@ -891,22 +714,32 @@ def conciliar_bases(
         origem = linha["_merge"]
         status = linha.get("Status_resultado", "")
 
+        # Estava planejada, mas não apareceu no resultado:
+        # ausência do técnico/oficina.
         if origem == "left_only":
             return "No-show"
 
+        # Apareceu apenas no resultado.
         if origem == "right_only":
             if status_improdutivo(status):
                 return "Improdutiva extra"
+
             if status_cancelado(status):
                 return "Cancelada extra"
+
             if status_executado(status):
                 return "Execução extra"
+
             return "Evento extra"
 
+        # A ordem é importante: "Não concluído" também contém
+        # a palavra "concluído", então improdutiva vem primeiro.
         if status_improdutivo(status):
             return "Improdutiva"
+
         if status_cancelado(status):
             return "Cancelada"
+
         if status_executado(status):
             return "Executada planejada"
 
@@ -922,8 +755,12 @@ def conciliar_bases(
             "Sim"
             if (
                 linha["_merge"] == "both"
-                and texto_limpo(linha.get("OS_planejada", ""))
-                != texto_limpo(linha.get("OS_resultado", ""))
+                and texto_limpo(
+                    linha.get("OS_planejada", "")
+                )
+                != texto_limpo(
+                    linha.get("OS_resultado", "")
+                )
             )
             else "Não"
         ),
@@ -932,312 +769,23 @@ def conciliar_bases(
 
     conciliacao["Oficina"] = conciliacao[
         "Oficina_planejada"
-    ].fillna(conciliacao["Oficina_resultado"])
+    ].fillna(
+        conciliacao["Oficina_resultado"]
+    )
 
     conciliacao["Ticket"] = conciliacao[
         "Ticket_planejado"
-    ].fillna(conciliacao["Ticket_resultado"])
+    ].fillna(
+        conciliacao["Ticket_resultado"]
+    )
 
     conciliacao["Placa"] = conciliacao[
         "Placa_planejada"
-    ].fillna(conciliacao["Placa_resultado"])
-
-    estado_planejado = (
-        conciliacao["Estado_planejado"]
-        if "Estado_planejado" in conciliacao.columns
-        else pd.Series("", index=conciliacao.index)
-    )
-    estado_resultado = (
-        conciliacao["Estado_resultado"]
-        if "Estado_resultado" in conciliacao.columns
-        else pd.Series("", index=conciliacao.index)
-    )
-    conciliacao["Estado"] = estado_planejado.fillna(
-        estado_resultado
+    ].fillna(
+        conciliacao["Placa_resultado"]
     )
 
     return conciliacao
-
-
-def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
-    planejadas = int(
-        conciliacao[
-            conciliacao["_merge"] != "right_only"
-        ].shape[0]
-    )
-    executadas_planejadas = int(
-        (
-            conciliacao["Classificação"]
-            == "Executada planejada"
-        ).sum()
-    )
-    improdutivas = int(
-        (
-            conciliacao["Classificação"]
-            == "Improdutiva"
-        ).sum()
-    )
-    canceladas = int(
-        (
-            conciliacao["Classificação"]
-            == "Cancelada"
-        ).sum()
-    )
-    no_show = int(
-        (
-            conciliacao["Classificação"]
-            == "No-show"
-        ).sum()
-    )
-    executadas_extras = int(
-        (
-            conciliacao["Classificação"]
-            == "Execução extra"
-        ).sum()
-    )
-
-    total_executadas = (
-        executadas_planejadas
-        + executadas_extras
-    )
-
-    def percentual(parte, total):
-        return 0.0 if total <= 0 else (parte / total) * 100
-
-    return {
-        "planejadas": planejadas,
-        "executadas_planejadas": executadas_planejadas,
-        "improdutivas": improdutivas,
-        "canceladas": canceladas,
-        "no_show": no_show,
-        "executadas_extras": executadas_extras,
-        "total_executadas": total_executadas,
-        "indice_execucao": percentual(
-            executadas_planejadas,
-            planejadas,
-        ),
-        "indice_improdutividade": percentual(
-            improdutivas,
-            planejadas,
-        ),
-        "indice_cancelamento": percentual(
-            canceladas,
-            planejadas,
-        ),
-        "indice_no_show": percentual(
-            no_show,
-            planejadas,
-        ),
-        "indice_execucao_total": percentual(
-            total_executadas,
-            planejadas,
-        ),
-    }
-
-
-# =========================================================
-# PERSISTÊNCIA DAS BASES
-# =========================================================
-
-def dataframe_para_registros(
-    df: pd.DataFrame,
-    data_operacional: str,
-) -> list[dict]:
-    base = criar_chaves(df)
-    registros = []
-
-    for _, linha in base.iterrows():
-        registros.append(
-            {
-                "data_operacional": data_operacional,
-                "chave_atendimento": texto_limpo(
-                    linha["Chave Atendimento"]
-                ),
-                "ticket_jira": texto_limpo(
-                    linha.get("Ticket Jira", "")
-                ) or None,
-                "os": texto_limpo(
-                    linha.get("OS", "")
-                ) or None,
-                "placa": texto_limpo(
-                    linha.get("Placa", "")
-                ) or None,
-                "oficina": texto_limpo(
-                    linha.get("Oficina", "")
-                ) or None,
-                "cliente": texto_limpo(
-                    linha.get("Cliente", "")
-                ) or None,
-                "estado": texto_limpo(
-                    linha.get("Estado", "")
-                ) or None,
-                "cidade": texto_limpo(
-                    linha.get("Cidade", "")
-                ) or None,
-                "tipo_atividade": texto_limpo(
-                    linha.get("Tipo de Atividade", "")
-                ) or None,
-                "status_atividade": texto_limpo(
-                    linha.get("Status da Atividade", "")
-                ) or None,
-                "recurso": texto_limpo(
-                    linha.get("Recurso", "")
-                ) or None,
-                "dados": linha_para_json(linha),
-            }
-        )
-
-    return registros
-
-
-def salvar_base_supabase(
-    tipo: str,
-    data_operacional: str,
-    nome_arquivo: str,
-    df: pd.DataFrame,
-):
-    tabela = (
-        "atividades_planejadas"
-        if tipo == "planejado"
-        else "atividades_resultado"
-    )
-
-    (
-        supabase.table(tabela)
-        .delete()
-        .eq("data_operacional", data_operacional)
-        .execute()
-    )
-
-    registros = dataframe_para_registros(
-        df,
-        data_operacional,
-    )
-
-    for lote in executar_em_lotes(registros):
-        supabase.table(tabela).insert(lote).execute()
-
-    metadados = {
-        "tipo": tipo,
-        "data_operacional": data_operacional,
-        "nome_arquivo": nome_arquivo,
-        "quantidade_registros": len(df),
-        "atualizado_em": datetime.now().isoformat(),
-    }
-
-    (
-        supabase.table("bases_importadas")
-        .upsert(
-            metadados,
-            on_conflict="tipo,data_operacional",
-        )
-        .execute()
-    )
-
-
-def registros_para_dataframe(dados: list[dict]) -> pd.DataFrame:
-    if not dados:
-        return pd.DataFrame()
-
-    linhas = []
-    for registro in dados:
-        dados_originais = registro.get("dados") or {}
-        if isinstance(dados_originais, str):
-            try:
-                dados_originais = json.loads(dados_originais)
-            except json.JSONDecodeError:
-                dados_originais = {}
-
-        linha = dict(dados_originais)
-
-        mapa_fallback = {
-            "Ticket Jira": "ticket_jira",
-            "OS": "os",
-            "Placa": "placa",
-            "Oficina": "oficina",
-            "Cliente": "cliente",
-            "Estado": "estado",
-            "Cidade": "cidade",
-            "Tipo de Atividade": "tipo_atividade",
-            "Status da Atividade": "status_atividade",
-            "Recurso": "recurso",
-        }
-
-        for destino, origem in mapa_fallback.items():
-            if destino not in linha:
-                linha[destino] = registro.get(origem)
-
-        linha["Data Operacional"] = registro.get(
-            "data_operacional"
-        )
-        linhas.append(linha)
-
-    return pd.DataFrame(linhas)
-
-
-def carregar_base_supabase(
-    tipo: str,
-    data_operacional: str,
-) -> pd.DataFrame:
-    tabela = (
-        "atividades_planejadas"
-        if tipo == "planejado"
-        else "atividades_resultado"
-    )
-
-    resposta = (
-        supabase.table(tabela)
-        .select("*")
-        .eq("data_operacional", data_operacional)
-        .range(0, 9999)
-        .execute()
-    )
-
-    return registros_para_dataframe(
-        resposta.data or []
-    )
-
-
-def listar_bases_supabase() -> pd.DataFrame:
-    dados = buscar_todos(
-        "bases_importadas",
-        "id,tipo,data_operacional,nome_arquivo,"
-        "quantidade_registros,criado_em,atualizado_em",
-    )
-
-    if not dados:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(dados)
-    return df.sort_values(
-        ["data_operacional", "tipo"],
-        ascending=[False, True],
-    ).reset_index(drop=True)
-
-
-def excluir_base_supabase(
-    tipo: str,
-    data_operacional: str,
-):
-    tabela = (
-        "atividades_planejadas"
-        if tipo == "planejado"
-        else "atividades_resultado"
-    )
-
-    (
-        supabase.table(tabela)
-        .delete()
-        .eq("data_operacional", data_operacional)
-        .execute()
-    )
-    (
-        supabase.table("bases_importadas")
-        .delete()
-        .eq("tipo", tipo)
-        .eq("data_operacional", data_operacional)
-        .execute()
-    )
 
 
 # =========================================================
@@ -1261,34 +809,24 @@ def dataframe_para_excel(
         )
 
     buffer.seek(0)
+
     return buffer.getvalue()
 
 
 # =========================================================
-# ESTADO DA SESSÃO E CARGA INICIAL
+# ESTADO DA SESSÃO
 # =========================================================
 
 estados_iniciais = {
     "cadastro_oficinas": None,
-    "planejado_selecionado": None,
-    "resultado_selecionado": None,
-    "planejado_follow": None,
+    "planejado_ontem": None,
+    "resultado_ontem": None,
+    "planejado_hoje": None,
 }
 
 for chave, valor in estados_iniciais.items():
     if chave not in st.session_state:
         st.session_state[chave] = valor
-
-if (
-    MODO_BANCO
-    and st.session_state.cadastro_oficinas is None
-):
-    try:
-        cadastro_banco = carregar_cadastro_supabase()
-        if not cadastro_banco.empty:
-            st.session_state.cadastro_oficinas = cadastro_banco
-    except Exception:
-        pass
 
 
 # =========================================================
@@ -1297,18 +835,6 @@ if (
 
 st.title("🚛 Operações de Campo PS")
 st.caption("Sistema de Gestão Operacional de Campo")
-
-if MODO_BANCO:
-    st.success(
-        "Banco Supabase conectado — dados persistentes ativos.",
-        icon="✅",
-    )
-else:
-    st.warning(
-        "Supabase não conectado. Configure SUPABASE_URL e "
-        "SUPABASE_SERVICE_KEY nos Secrets do Streamlit.",
-        icon="⚠️",
-    )
 
 st.divider()
 
@@ -1320,264 +846,160 @@ with st.sidebar:
         [
             "📊 Painel de Controle",
             "📥 Importações",
-            "🗂 Bases Salvas",
             "🔄 Conciliação",
             "🏢 Cadastro de Oficinas",
             "🏆 Ranking por Consultor",
-            "📞 Follow",
+            "📞 Follow de Hoje",
+            "📋 Bases Importadas",
         ],
     )
 
     st.divider()
-    st.caption("Versão 0.7 — Supabase e painel regional")
+    st.caption("Versão 0.5.1 — Improdutiva e No-show")
 
 
 # =========================================================
-# IMPORTAÇÕES
+# TELA DE IMPORTAÇÕES
 # =========================================================
 
 if pagina == "📥 Importações":
-    st.subheader("Importação permanente das bases")
+    st.subheader("Importação dos arquivos")
 
-    if not MODO_BANCO:
-        st.error(
-            "Configure o Supabase antes de salvar as bases."
-        )
-        st.stop()
-
-    aba_oficinas, aba_planejado, aba_resultado = st.tabs(
-        [
-            "🏢 Cadastro de oficinas",
-            "📋 Planejado",
-            "📈 Resultado",
-        ]
-    )
-
-    with aba_oficinas:
-        arquivo_cadastro = st.file_uploader(
-            "Cadastro oficial ou consolidado",
-            type=["ods", "xlsx", "csv"],
-            key="cadastro_supabase",
-        )
-
-        if arquivo_cadastro is not None:
-            cadastro_bruto = ler_cadastro_oficinas(
-                arquivo_cadastro
-            )
-            cadastro = preparar_cadastro(cadastro_bruto)
-
-            st.write(
-                f"Oficinas identificadas: **{len(cadastro)}**"
-            )
-            st.dataframe(
-                cadastro.head(20),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            if st.button(
-                "💾 Salvar cadastro no Supabase",
-                type="primary",
-            ):
-                try:
-                    salvar_cadastro_supabase(cadastro)
-                    st.session_state.cadastro_oficinas = (
-                        carregar_cadastro_supabase()
-                    )
-                    st.success(
-                        f"{len(cadastro)} oficinas salvas/atualizadas."
-                    )
-                except Exception as erro:
-                    st.error(f"Erro ao salvar oficinas: {erro}")
-
-    with aba_planejado:
-        arquivo_planejado = st.file_uploader(
-            "Arquivo planejado do OFS",
-            type=["csv"],
-            key="planejado_supabase",
-        )
-
-        if arquivo_planejado is not None:
-            df_planejado = ler_csv_ofs(arquivo_planejado)
-            data_detectada = detectar_data_base(df_planejado)
-
-            data_planejado = st.date_input(
-                "Data operacional do planejado",
-                value=(
-                    date.fromisoformat(data_detectada)
-                    if data_detectada
-                    else date.today()
-                ),
-                key="data_planejado",
-            )
-
-            st.info(
-                f"{len(df_planejado)} registros serão salvos "
-                f"para {data_planejado.strftime('%d/%m/%Y')}."
-            )
-
-            substituir = st.checkbox(
-                "Confirmo que, se já existir uma base dessa data, "
-                "ela será substituída.",
-                key="confirmar_planejado",
-            )
-
-            if st.button(
-                "💾 Salvar planejado",
-                type="primary",
-                disabled=not substituir,
-            ):
-                try:
-                    salvar_base_supabase(
-                        "planejado",
-                        data_planejado.isoformat(),
-                        arquivo_planejado.name,
-                        df_planejado,
-                    )
-                    st.success("Planejado salvo com sucesso.")
-                except Exception as erro:
-                    st.error(f"Erro ao salvar planejado: {erro}")
-
-    with aba_resultado:
-        arquivo_resultado = st.file_uploader(
-            "Arquivo de resultado do OFS",
-            type=["csv"],
-            key="resultado_supabase",
-        )
-
-        if arquivo_resultado is not None:
-            df_resultado = ler_csv_ofs(arquivo_resultado)
-            data_detectada = detectar_data_base(df_resultado)
-
-            data_resultado = st.date_input(
-                "Data operacional do resultado",
-                value=(
-                    date.fromisoformat(data_detectada)
-                    if data_detectada
-                    else date.today()
-                ),
-                key="data_resultado",
-            )
-
-            st.info(
-                f"{len(df_resultado)} registros serão salvos "
-                f"para {data_resultado.strftime('%d/%m/%Y')}."
-            )
-
-            substituir = st.checkbox(
-                "Confirmo que, se já existir uma base dessa data, "
-                "ela será substituída.",
-                key="confirmar_resultado",
-            )
-
-            if st.button(
-                "💾 Salvar resultado",
-                type="primary",
-                disabled=not substituir,
-            ):
-                try:
-                    salvar_base_supabase(
-                        "resultado",
-                        data_resultado.isoformat(),
-                        arquivo_resultado.name,
-                        df_resultado,
-                    )
-                    st.success("Resultado salvo com sucesso.")
-                except Exception as erro:
-                    st.error(f"Erro ao salvar resultado: {erro}")
-
-
-# =========================================================
-# BASES SALVAS
-# =========================================================
-
-elif pagina == "🗂 Bases Salvas":
-    if not MODO_BANCO:
-        st.error("Supabase não conectado.")
-        st.stop()
-
-    st.subheader("Bases armazenadas no Supabase")
-
-    bases = listar_bases_supabase()
-
-    if bases.empty:
-        st.info("Nenhuma base foi salva ainda.")
-        st.stop()
-
-    st.dataframe(
-        bases,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    opcoes = [
-        (
-            f"{linha['data_operacional']} — "
-            f"{linha['tipo']} — "
-            f"{linha['quantidade_registros']} registros"
-        )
-        for _, linha in bases.iterrows()
-    ]
-
-    selecao = st.selectbox(
-        "Escolha uma base para visualizar, baixar ou excluir",
-        range(len(opcoes)),
-        format_func=lambda indice: opcoes[indice],
-    )
-
-    registro = bases.iloc[selecao]
-    tipo = registro["tipo"]
-    data_operacional = registro["data_operacional"]
-
-    base = carregar_base_supabase(
-        tipo,
-        data_operacional,
-    )
-
-    st.dataframe(
-        base,
-        use_container_width=True,
-        hide_index=True,
-        height=450,
+    st.info(
+        "Planejado de ontem e Resultado de ontem devem representar "
+        "o mesmo dia operacional."
     )
 
     col1, col2 = st.columns(2)
 
-    col1.download_button(
-        "⬇️ Baixar em Excel",
-        data=dataframe_para_excel(
-            base,
-            tipo.capitalize(),
-        ),
-        file_name=(
-            f"{tipo}_{data_operacional}.xlsx"
-        ),
-        mime=(
-            "application/vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
-        ),
-        use_container_width=True,
+    with col1:
+        st.markdown("### 🏢 Cadastro das oficinas")
+
+        arquivo_cadastro = st.file_uploader(
+            "Cadastro oficial ou consolidado",
+            type=["ods", "xlsx", "csv"],
+            key="arquivo_cadastro",
+        )
+
+        if arquivo_cadastro is not None:
+            try:
+                cadastro_bruto = ler_cadastro_oficinas(
+                    arquivo_cadastro
+                )
+
+                st.session_state.cadastro_oficinas = (
+                    preparar_cadastro(cadastro_bruto)
+                )
+
+                st.success(
+                    f"{len(st.session_state.cadastro_oficinas)} "
+                    "oficinas importadas."
+                )
+
+            except Exception as erro:
+                st.error(f"Erro no cadastro: {erro}")
+
+    with col2:
+        st.markdown("### 📅 Planejado de hoje")
+
+        arquivo_planejado_hoje = st.file_uploader(
+            "Planejamento usado no ranking e follow",
+            type=["csv"],
+            key="arquivo_planejado_hoje",
+        )
+
+        if arquivo_planejado_hoje is not None:
+            try:
+                st.session_state.planejado_hoje = ler_csv_ofs(
+                    arquivo_planejado_hoje
+                )
+
+                st.success(
+                    f"{len(st.session_state.planejado_hoje)} "
+                    "atividades planejadas para hoje."
+                )
+
+            except Exception as erro:
+                st.error(f"Erro no planejado de hoje: {erro}")
+
+    st.divider()
+
+    col3, col4 = st.columns(2)
+
+    with col3:
+        st.markdown("### 📋 Planejado de ontem")
+
+        arquivo_planejado_ontem = st.file_uploader(
+            "Fotografia inicial de ontem",
+            type=["csv"],
+            key="arquivo_planejado_ontem",
+        )
+
+        if arquivo_planejado_ontem is not None:
+            try:
+                st.session_state.planejado_ontem = ler_csv_ofs(
+                    arquivo_planejado_ontem
+                )
+
+                st.success(
+                    f"{len(st.session_state.planejado_ontem)} "
+                    "atividades no planejado de ontem."
+                )
+
+            except Exception as erro:
+                st.error(f"Erro no planejado de ontem: {erro}")
+
+    with col4:
+        st.markdown("### 📈 Resultado de ontem")
+
+        arquivo_resultado_ontem = st.file_uploader(
+            "Arquivo consolidado após o encerramento do dia",
+            type=["csv"],
+            key="arquivo_resultado_ontem",
+        )
+
+        if arquivo_resultado_ontem is not None:
+            try:
+                st.session_state.resultado_ontem = ler_csv_ofs(
+                    arquivo_resultado_ontem
+                )
+
+                st.success(
+                    f"{len(st.session_state.resultado_ontem)} "
+                    "atividades no resultado de ontem."
+                )
+
+            except Exception as erro:
+                st.error(f"Erro no resultado de ontem: {erro}")
+
+    st.divider()
+
+    cadastro = st.session_state.cadastro_oficinas
+    planejado_ontem = st.session_state.planejado_ontem
+    resultado_ontem = st.session_state.resultado_ontem
+    planejado_hoje = st.session_state.planejado_hoje
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Oficinas cadastradas",
+        0 if cadastro is None else len(cadastro),
     )
 
-    confirmar_exclusao = col2.checkbox(
-        "Confirmar exclusão permanente",
-        key=f"excluir_{tipo}_{data_operacional}",
+    c2.metric(
+        "Planejado ontem",
+        0 if planejado_ontem is None else len(planejado_ontem),
     )
 
-    if col2.button(
-        "🗑 Excluir base",
-        disabled=not confirmar_exclusao,
-        use_container_width=True,
-    ):
-        try:
-            excluir_base_supabase(
-                tipo,
-                data_operacional,
-            )
-            st.success("Base excluída.")
-            st.rerun()
-        except Exception as erro:
-            st.error(f"Erro ao excluir: {erro}")
+    c3.metric(
+        "Resultado ontem",
+        0 if resultado_ontem is None else len(resultado_ontem),
+    )
+
+    c4.metric(
+        "Planejado hoje",
+        0 if planejado_hoje is None else len(planejado_hoje),
+    )
 
 
 # =========================================================
@@ -1585,242 +1007,85 @@ elif pagina == "🗂 Bases Salvas":
 # =========================================================
 
 elif pagina == "📊 Painel de Controle":
-    if not MODO_BANCO:
-        st.error("Supabase não conectado.")
-        st.stop()
+    planejado_ontem = st.session_state.planejado_ontem
+    resultado_ontem = st.session_state.resultado_ontem
+    planejado_hoje = st.session_state.planejado_hoje
 
-    bases = listar_bases_supabase()
-
-    if bases.empty:
-        st.warning("Importe planejados e resultados.")
-        st.stop()
-
-    planejados = set(
-        bases.loc[
-            bases["tipo"] == "planejado",
-            "data_operacional",
-        ].astype(str)
-    )
-    resultados = set(
-        bases.loc[
-            bases["tipo"] == "resultado",
-            "data_operacional",
-        ].astype(str)
-    )
-    datas_completas = sorted(
-        planejados.intersection(resultados),
-        reverse=True,
-    )
-
-    if not datas_completas:
+    if planejado_ontem is None or resultado_ontem is None:
         st.warning(
-            "Ainda não existe uma data com planejado e resultado."
+            "Importe o planejado e o resultado de ontem "
+            "na tela Importações."
         )
         st.stop()
-
-    data_analisada = st.selectbox(
-        "Data operacional analisada",
-        datas_completas,
-        format_func=lambda valor: pd.to_datetime(
-            valor
-        ).strftime("%d/%m/%Y"),
-    )
-
-    planejado = carregar_base_supabase(
-        "planejado",
-        data_analisada,
-    )
-    resultado = carregar_base_supabase(
-        "resultado",
-        data_analisada,
-    )
-    cadastro = st.session_state.cadastro_oficinas
 
     conciliacao = conciliar_bases(
-        planejado,
-        resultado,
+        planejado_ontem,
+        resultado_ontem,
     )
 
-    if cadastro is not None and not cadastro.empty:
-        conciliacao = enriquecer_com_cadastro(
-            conciliacao,
-            cadastro,
-        )
-    else:
-        conciliacao["Consultor"] = (
-            conciliacao["Estado"]
-            .apply(padronizar_uf)
-            .map(MAPA_CONSULTORES_UF)
-            .fillna("Não definido")
-        )
-
-    indicadores = calcular_indicadores(conciliacao)
-
-    st.markdown("## Painel geral")
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-
-    c1.metric("Planejadas", indicadores["planejadas"])
-    c2.metric(
-        "Executadas planejadas",
-        indicadores["executadas_planejadas"],
-        formatar_percentual(
-            indicadores["indice_execucao"]
-        ),
-    )
-    c3.metric(
-        "Improdutivas",
-        indicadores["improdutivas"],
-        formatar_percentual(
-            indicadores["indice_improdutividade"]
-        ),
-        delta_color="inverse",
-    )
-    c4.metric(
-        "Canceladas",
-        indicadores["canceladas"],
-        formatar_percentual(
-            indicadores["indice_cancelamento"]
-        ),
-        delta_color="inverse",
-    )
-    c5.metric(
-        "No-show",
-        indicadores["no_show"],
-        formatar_percentual(
-            indicadores["indice_no_show"]
-        ),
-        delta_color="inverse",
-    )
-    c6.metric(
-        "Executadas extras",
-        indicadores["executadas_extras"],
+    planejadas = int(
+        conciliacao[
+            conciliacao["_merge"] != "right_only"
+        ].shape[0]
     )
 
-    st.markdown("### Indicadores MCI e MD")
-    i1, i2, i3 = st.columns(3)
-
-    i1.metric(
-        "MCI — Execução do planejado",
-        formatar_percentual(
-            indicadores["indice_execucao"]
-        ),
-        delta=formatar_percentual(
-            indicadores["indice_execucao"] - META_MCI
-        ),
-        help="Executadas planejadas ÷ Planejadas.",
-    )
-    i2.metric(
-        "MD — Improdutividade",
-        formatar_percentual(
-            indicadores["indice_improdutividade"]
-        ),
-        delta=formatar_percentual(
-            META_IMPRODUTIVIDADE
-            - indicadores["indice_improdutividade"]
-        ),
-        help="Improdutivas ÷ Planejadas.",
-    )
-    i3.metric(
-        "Execução total com extras",
-        formatar_percentual(
-            indicadores["indice_execucao_total"]
-        ),
+    executadas_planejadas = int(
+        (
+            conciliacao["Classificação"]
+            == "Executada planejada"
+        ).sum()
     )
 
-    if indicadores["indice_improdutividade"] <= META_IMPRODUTIVIDADE:
-        st.success("Improdutividade dentro da meta de 10%.")
-    else:
-        st.warning("Improdutividade acima da meta de 10%.")
+    improdutivas = int(
+        (
+            conciliacao["Classificação"]
+            == "Improdutiva"
+        ).sum()
+    )
+
+    canceladas = int(
+        (
+            conciliacao["Classificação"]
+            == "Cancelada"
+        ).sum()
+    )
+
+    no_show = int(
+        (
+            conciliacao["Classificação"]
+            == "No-show"
+        ).sum()
+    )
+
+    executadas_extras = int(
+        (
+            conciliacao["Classificação"]
+            == "Execução extra"
+        ).sum()
+    )
+
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+
+    col1.metric("Planejadas", planejadas)
+    col2.metric("Executadas planejadas", executadas_planejadas)
+    col3.metric("Improdutivas", improdutivas)
+    col4.metric("Canceladas", canceladas)
+    col5.metric("No-show", no_show)
+    col6.metric("Executadas extras", executadas_extras)
 
     st.divider()
-    st.markdown("## Indicadores por consultor e região")
 
-    consultores_disponiveis = sorted(
-        conciliacao["Consultor"]
-        .fillna("Não definido")
-        .unique()
-        .tolist()
-    )
-
-    consultor = st.selectbox(
-        "Selecione o consultor",
-        consultores_disponiveis,
-    )
-
-    regional = conciliacao[
-        conciliacao["Consultor"] == consultor
-    ].copy()
-
-    indicadores_regionais = calcular_indicadores(
-        regional
-    )
-
-    st.caption(
-        f"Região: {REGIOES_CONSULTORES.get(consultor, 'Não definida')}"
-    )
-
-    r1, r2, r3, r4, r5, r6 = st.columns(6)
-
-    r1.metric(
-        "Planejadas",
-        indicadores_regionais["planejadas"],
-    )
-    r2.metric(
-        "Executadas",
-        indicadores_regionais[
-            "executadas_planejadas"
-        ],
-    )
-    r3.metric(
-        "Improdutivas",
-        indicadores_regionais["improdutivas"],
-    )
-    r4.metric(
-        "Canceladas",
-        indicadores_regionais["canceladas"],
-    )
-    r5.metric(
-        "No-show",
-        indicadores_regionais["no_show"],
-    )
-    r6.metric(
-        "Extras",
-        indicadores_regionais["executadas_extras"],
-    )
-
-    ri1, ri2, ri3 = st.columns(3)
-    ri1.metric(
-        "MCI regional",
-        formatar_percentual(
-            indicadores_regionais["indice_execucao"]
-        ),
-    )
-    ri2.metric(
-        "MD regional",
-        formatar_percentual(
-            indicadores_regionais[
-                "indice_improdutividade"
-            ]
-        ),
-    )
-    ri3.metric(
-        "Execução total regional",
-        formatar_percentual(
-            indicadores_regionais[
-                "indice_execucao_total"
-            ]
-        ),
-    )
-
-    st.divider()
     esquerda, direita = st.columns(2)
 
     with esquerda:
+        st.subheader("Classificação dos atendimentos")
+
         resumo = (
             conciliacao["Classificação"]
             .value_counts()
             .reset_index()
         )
+
         resumo.columns = [
             "Classificação",
             "Quantidade",
@@ -1832,44 +1097,48 @@ elif pagina == "📊 Painel de Controle":
             y="Classificação",
             orientation="h",
             text="Quantidade",
-            title="Classificação geral",
         )
+
         grafico.update_layout(
             showlegend=False,
             height=480,
         )
+
         st.plotly_chart(
             grafico,
             use_container_width=True,
         )
 
     with direita:
-        resumo_consultor = (
-            regional["Classificação"]
-            .value_counts()
-            .reset_index()
-        )
-        resumo_consultor.columns = [
-            "Classificação",
-            "Quantidade",
-        ]
+        st.subheader("Planejado de hoje")
 
-        grafico_regional = px.bar(
-            resumo_consultor,
-            x="Quantidade",
-            y="Classificação",
-            orientation="h",
-            text="Quantidade",
-            title=f"Classificação — {consultor}",
-        )
-        grafico_regional.update_layout(
-            showlegend=False,
-            height=480,
-        )
-        st.plotly_chart(
-            grafico_regional,
-            use_container_width=True,
-        )
+        if planejado_hoje is None:
+            st.info(
+                "Importe o planejado de hoje para ver "
+                "ranking e follow."
+            )
+
+        else:
+            st.metric(
+                "Atividades de hoje",
+                len(planejado_hoje),
+            )
+
+            st.metric(
+                "Tickets de hoje",
+                contar_unicos(
+                    planejado_hoje,
+                    "Ticket Jira",
+                ),
+            )
+
+            st.metric(
+                "Oficinas de hoje",
+                contar_unicos(
+                    planejado_hoje,
+                    "Oficina",
+                ),
+            )
 
 
 # =========================================================
@@ -1877,66 +1146,36 @@ elif pagina == "📊 Painel de Controle":
 # =========================================================
 
 elif pagina == "🔄 Conciliação":
-    if not MODO_BANCO:
-        st.error("Supabase não conectado.")
-        st.stop()
+    planejado_ontem = st.session_state.planejado_ontem
+    resultado_ontem = st.session_state.resultado_ontem
 
-    bases = listar_bases_supabase()
-    planejados = set(
-        bases.loc[
-            bases["tipo"] == "planejado",
-            "data_operacional",
-        ].astype(str)
-    )
-    resultados = set(
-        bases.loc[
-            bases["tipo"] == "resultado",
-            "data_operacional",
-        ].astype(str)
-    )
-    datas = sorted(
-        planejados.intersection(resultados),
-        reverse=True,
-    )
-
-    if not datas:
+    if planejado_ontem is None or resultado_ontem is None:
         st.warning(
-            "Não há data completa para conciliação."
+            "Importe o planejado e o resultado de ontem."
         )
         st.stop()
 
-    data_escolhida = st.selectbox(
-        "Data",
-        datas,
-        format_func=lambda valor: pd.to_datetime(
-            valor
-        ).strftime("%d/%m/%Y"),
-        key="data_conciliacao",
+    conciliacao = conciliar_bases(
+        planejado_ontem,
+        resultado_ontem,
     )
 
-    conciliacao = conciliar_bases(
-        carregar_base_supabase(
-            "planejado",
-            data_escolhida,
-        ),
-        carregar_base_supabase(
-            "resultado",
-            data_escolhida,
-        ),
-    )
+    st.subheader("Conciliação Planejado × Resultado")
 
     classificacoes = sorted(
         conciliacao["Classificação"]
         .unique()
         .tolist()
     )
+
     filtro = st.multiselect(
-        "Classificação",
+        "Filtrar classificação",
         classificacoes,
         default=classificacoes,
     )
+
     somente_troca = st.checkbox(
-        "Somente troca de OS"
+        "Mostrar somente atendimentos com troca de OS"
     )
 
     tabela = conciliacao[
@@ -1948,24 +1187,48 @@ elif pagina == "🔄 Conciliação":
             tabela["Troca de OS"] == "Sim"
         ]
 
+    colunas_exibir = [
+        "Classificação",
+        "Ticket",
+        "Placa",
+        "Oficina",
+        "OS_planejada",
+        "OS_resultado",
+        "Troca de OS",
+        "Status_resultado",
+        "Qtd_planejada",
+        "Qtd_resultado",
+    ]
+
+    colunas_exibir = [
+        coluna
+        for coluna in colunas_exibir
+        if coluna in tabela.columns
+    ]
+
+    st.write(
+        f"Registros encontrados: **{len(tabela)}**"
+    )
+
     st.dataframe(
-        tabela,
+        tabela[colunas_exibir],
         use_container_width=True,
         hide_index=True,
         height=600,
     )
 
     st.download_button(
-        "⬇️ Baixar conciliação",
+        "⬇️ Baixar conciliação em Excel",
         data=dataframe_para_excel(
-            tabela,
+            conciliacao,
             "Conciliacao",
         ),
-        file_name=f"conciliacao_{data_escolhida}.xlsx",
+        file_name="conciliacao_planejado_resultado.xlsx",
         mime=(
             "application/vnd.openxmlformats-officedocument."
             "spreadsheetml.sheet"
         ),
+        use_container_width=True,
     )
 
 
@@ -1976,7 +1239,7 @@ elif pagina == "🔄 Conciliação":
 elif pagina == "🏢 Cadastro de Oficinas":
     cadastro = st.session_state.cadastro_oficinas
 
-    if cadastro is None or cadastro.empty:
+    if cadastro is None:
         st.warning(
             "Importe o cadastro das oficinas."
         )
@@ -1984,7 +1247,10 @@ elif pagina == "🏢 Cadastro de Oficinas":
 
     st.subheader("Cadastro mestre de oficinas")
 
-    pesquisa = st.text_input("Pesquisar oficina")
+    pesquisa = st.text_input(
+        "Pesquisar oficina"
+    )
+
     cadastro_filtrado = cadastro.copy()
 
     if pesquisa:
@@ -2009,82 +1275,49 @@ elif pagina == "🏢 Cadastro de Oficinas":
             ),
             "Prioridade": st.column_config.SelectboxColumn(
                 "Prioridade",
-                options=["Alta", "Normal", "Baixa"],
-            ),
-            "Ativa": st.column_config.CheckboxColumn(
-                "Ativa"
+                options=[
+                    "Alta",
+                    "Normal",
+                    "Baixa",
+                ],
             ),
         },
-        disabled=[
-            "Chave Oficina",
-            "Consultor automático",
-        ],
     )
 
-    if MODO_BANCO and st.button(
-        "💾 Salvar alterações no Supabase",
-        type="primary",
-    ):
-        try:
-            cadastro_editado["Chave Oficina"] = (
-                cadastro_editado["Oficina"]
-                .apply(normalizar_texto)
-            )
-            salvar_cadastro_supabase(
-                cadastro_editado
-            )
-            st.session_state.cadastro_oficinas = (
-                carregar_cadastro_supabase()
-            )
-            st.success("Cadastro atualizado.")
-        except Exception as erro:
-            st.error(f"Erro ao salvar: {erro}")
+    st.caption(
+        "As alterações permanecem apenas durante a sessão atual."
+    )
 
 
 # =========================================================
-# RANKING
+# RANKING POR CONSULTOR
 # =========================================================
 
 elif pagina == "🏆 Ranking por Consultor":
-    if not MODO_BANCO:
-        st.error("Supabase não conectado.")
-        st.stop()
-
     cadastro = st.session_state.cadastro_oficinas
-    bases = listar_bases_supabase()
-    datas = sorted(
-        bases.loc[
-            bases["tipo"] == "planejado",
-            "data_operacional",
-        ].astype(str).unique(),
-        reverse=True,
-    )
+    planejado_hoje = st.session_state.planejado_hoje
 
-    if cadastro is None or cadastro.empty or not datas:
+    if cadastro is None or planejado_hoje is None:
         st.warning(
-            "É necessário ter cadastro e planejado salvos."
+            "Importe o cadastro e o planejado de hoje."
         )
         st.stop()
 
-    data_planejada = st.selectbox(
-        "Data do planejado",
-        datas,
-        format_func=lambda valor: pd.to_datetime(
-            valor
-        ).strftime("%d/%m/%Y"),
-    )
-
     base = enriquecer_com_cadastro(
-        carregar_base_supabase(
-            "planejado",
-            data_planejada,
-        ),
+        planejado_hoje,
         cadastro,
     )
 
+    base = base[
+        base["Oficina"].apply(texto_limpo) != ""
+    ]
+
     consultores = sorted(
-        base["Consultor"].unique().tolist()
+        base["Consultor"]
+        .unique()
+        .tolist()
     )
+
     consultor = st.selectbox(
         "Consultor",
         consultores,
@@ -2123,52 +1356,34 @@ elif pagina == "🏆 Ranking por Consultor":
 
 
 # =========================================================
-# FOLLOW
+# FOLLOW DE HOJE
 # =========================================================
 
-elif pagina == "📞 Follow":
-    if not MODO_BANCO:
-        st.error("Supabase não conectado.")
-        st.stop()
-
+elif pagina == "📞 Follow de Hoje":
     cadastro = st.session_state.cadastro_oficinas
-    bases = listar_bases_supabase()
-    datas = sorted(
-        bases.loc[
-            bases["tipo"] == "planejado",
-            "data_operacional",
-        ].astype(str).unique(),
-        reverse=True,
-    )
+    planejado_hoje = st.session_state.planejado_hoje
 
-    if cadastro is None or cadastro.empty or not datas:
+    if cadastro is None or planejado_hoje is None:
         st.warning(
-            "É necessário ter cadastro e planejado salvos."
+            "Importe o cadastro e o planejado de hoje."
         )
         st.stop()
 
-    data_planejada = st.selectbox(
-        "Data do follow",
-        datas,
-        format_func=lambda valor: pd.to_datetime(
-            valor
-        ).strftime("%d/%m/%Y"),
-    )
-
     base = enriquecer_com_cadastro(
-        carregar_base_supabase(
-            "planejado",
-            data_planejada,
-        ),
+        planejado_hoje,
         cadastro,
     )
+
     base = base[
         base["Oficina"].apply(texto_limpo) != ""
     ]
 
     consultores = sorted(
-        base["Consultor"].unique().tolist()
+        base["Consultor"]
+        .unique()
+        .tolist()
     )
+
     consultor = st.selectbox(
         "Consultor",
         consultores,
@@ -2220,7 +1435,9 @@ elif pagina == "📞 Follow":
             oficina = texto_limpo(
                 linha["Oficina"]
             )
+
             col1.subheader(oficina)
+
             col1.caption(
                 f"Prioridade: "
                 f"{texto_limpo(linha['Prioridade']) or 'Normal'}"
@@ -2238,11 +1455,9 @@ elif pagina == "📞 Follow":
             mensagem = (
                 f"Bom dia! Sua oficina possui "
                 f"{int(linha['Planejadas'])} serviço(s) "
-                f"programado(s) para "
-                f"{pd.to_datetime(data_planejada).strftime('%d/%m/%Y')}. "
-                f"Existe algum impedimento para a execução? "
-                f"Caso exista, informe para que possamos atuar "
-                f"preventivamente."
+                f"programado(s). Existe algum impedimento "
+                f"para a execução? Caso exista, informe "
+                f"para que possamos atuar preventivamente."
             )
 
             if telefone:
@@ -2250,10 +1465,83 @@ elif pagina == "📞 Follow":
                     f"https://wa.me/{telefone}"
                     f"?text={quote(mensagem)}"
                 )
+
                 col3.link_button(
                     "📱 Abrir WhatsApp",
                     link,
                     use_container_width=True,
                 )
+
             else:
                 col3.warning("Sem WhatsApp")
+
+
+# =========================================================
+# BASES IMPORTADAS
+# =========================================================
+
+elif pagina == "📋 Bases Importadas":
+    opcao = st.selectbox(
+        "Escolha a base",
+        [
+            "Planejado de ontem",
+            "Resultado de ontem",
+            "Planejado de hoje",
+            "Cadastro de oficinas",
+        ],
+    )
+
+    mapa_bases = {
+        "Planejado de ontem": st.session_state.planejado_ontem,
+        "Resultado de ontem": st.session_state.resultado_ontem,
+        "Planejado de hoje": st.session_state.planejado_hoje,
+        "Cadastro de oficinas": st.session_state.cadastro_oficinas,
+    }
+
+    base = mapa_bases[opcao]
+
+    if base is None:
+        st.warning(
+            "Essa base ainda não foi importada."
+        )
+        st.stop()
+
+    pesquisa = st.text_input(
+        "Pesquisar na base"
+    )
+
+    base_exibida = base.copy()
+
+    if pesquisa:
+        texto = pesquisa.lower().strip()
+
+        mascara = (
+            base_exibida
+            .astype(str)
+            .apply(
+                lambda coluna: (
+                    coluna
+                    .str.lower()
+                    .str.contains(
+                        texto,
+                        na=False,
+                    )
+                )
+            )
+            .any(axis=1)
+        )
+
+        base_exibida = base_exibida[
+            mascara
+        ]
+
+    st.write(
+        f"Registros encontrados: **{len(base_exibida)}**"
+    )
+
+    st.dataframe(
+        base_exibida,
+        use_container_width=True,
+        hide_index=True,
+        height=650,
+    )
