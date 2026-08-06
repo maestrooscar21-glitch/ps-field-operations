@@ -483,6 +483,30 @@ def preparar_cadastro(df_original: pd.DataFrame) -> pd.DataFrame:
     return cadastro.sort_values("Oficina").reset_index(drop=True)
 
 
+def filtrar_somente_manutencoes(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Mantém somente atividades cujo Tipo de Atividade contenha
+    a palavra MANUTEN, cobrindo manutenção, manutenções,
+    manutenção corretiva, preventiva e demais variações.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=df.columns if df is not None else [])
+
+    if "Tipo de Atividade" not in df.columns:
+        raise ValueError(
+            "A base não possui a coluna 'Tipo de Atividade'. "
+            "Não foi possível filtrar somente manutenções."
+        )
+
+    base = df.copy()
+
+    mascara = base["Tipo de Atividade"].apply(
+        lambda valor: "MANUTEN" in normalizar_texto(valor)
+    )
+
+    return base[mascara].copy().reset_index(drop=True)
+
+
 # =========================================================
 # CHAVES, CONCILIAÇÃO E INDICADORES
 # =========================================================
@@ -580,6 +604,10 @@ def conciliar_bases(
     planejado: pd.DataFrame,
     resultado: pd.DataFrame,
 ) -> pd.DataFrame:
+    # O painel considera exclusivamente manutenções de qualquer tipo.
+    planejado = filtrar_somente_manutencoes(planejado)
+    resultado = filtrar_somente_manutencoes(resultado)
+
     planejado = criar_chaves(planejado)
     resultado = criar_chaves(resultado)
 
@@ -1266,7 +1294,8 @@ with st.sidebar:
     pagina = st.radio(
         "Escolha uma tela",
         [
-            "📊 Painel de Controle",
+            "📊 Dashboard Executivo",
+            "👤 Painel do Consultor",
             "📥 Importações",
             "🗂 Bases Salvas",
             "🏢 Cadastro de Oficinas",
@@ -1277,7 +1306,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 1.3 — Consolidado geral, visão diária e regiões"
+        "Versão 1.5 — Somente manutenções, dashboard e painel do consultor"
     )
 
 
@@ -1465,7 +1494,7 @@ elif pagina == "🗂 Bases Salvas":
 # PAINEL
 # =========================================================
 
-elif pagina == "📊 Painel de Controle":
+elif pagina == "📊 Dashboard Executivo":
     exigir_supabase()
 
     bases = listar_bases()
@@ -1574,82 +1603,14 @@ elif pagina == "📊 Painel de Controle":
         ),
     )
 
-    # =====================================================
-    # VISÃO POR CONSULTOR E REGIÃO NA DATA SELECIONADA
-    # =====================================================
-
-    st.divider()
-    st.subheader("Visão por consultor e região")
-
-    if cadastro.empty:
-        st.info(
-            "Cadastre as oficinas para habilitar a visão "
-            "por consultor e região."
-        )
-        conciliacao_regional = conciliacao_dia.copy()
-        consultor_selecionado = "Todos"
-    else:
-        consultores_disponiveis = sorted(
-            {
-                texto_limpo(valor)
-                for valor in conciliacao_dia["Consultor"]
-                if texto_limpo(valor)
-            }
-        )
-
-        consultor_selecionado = st.selectbox(
-            "Selecione o consultor",
-            ["Todos"] + consultores_disponiveis,
-        )
-
-        if consultor_selecionado == "Todos":
-            conciliacao_regional = conciliacao_dia.copy()
-            st.caption(
-                "Todas as regiões da data selecionada."
-            )
-        else:
-            conciliacao_regional = conciliacao_dia[
-                conciliacao_dia["Consultor"]
-                == consultor_selecionado
-            ].copy()
-
-            st.info(
-                f"Consultor: **{consultor_selecionado}** · "
-                f"Região: **"
-                f"{REGIOES_CONSULTORES.get(consultor_selecionado, 'Não definida')}"
-                f"** · {len(conciliacao_regional)} atendimento(s)"
-            )
-
-        indicadores_regionais = calcular_indicadores(
-            conciliacao_regional
-        )
-        escopo_regional = (
-            f"regiao_{data_selecionada}_"
-            f"{normalizar_texto(consultor_selecionado)}"
-        )
-
-        exibir_cards_indicadores(
-            indicadores_regionais,
-            prefixo=escopo_regional,
-        )
-        exibir_detalhamento(
-            conciliacao_regional,
-            escopo=escopo_regional,
-            contexto=(
-                f"{consultor_selecionado} — "
-                f"{REGIOES_CONSULTORES.get(consultor_selecionado, 'Todas as regiões')} "
-                f"em {pd.to_datetime(data_selecionada).strftime('%d/%m/%Y')}"
-            ),
-        )
-
     st.divider()
     esquerda, direita = st.columns(2)
 
     with esquerda:
-        st.subheader("Classificação da visão regional")
+        st.subheader("Classificação da data selecionada")
 
         resumo = (
-            conciliacao_regional["Classificação"]
+            conciliacao_dia["Classificação"]
             .value_counts()
             .reset_index()
         )
@@ -1690,6 +1651,266 @@ elif pagina == "📊 Painel de Controle":
             "Consultores com atendimento",
             contar_unicos(conciliacao_dia, "Consultor"),
         )
+
+
+# =========================================================
+# PAINEL DO CONSULTOR
+# =========================================================
+
+elif pagina == "👤 Painel do Consultor":
+    exigir_supabase()
+
+    bases = listar_bases()
+
+    if bases.empty:
+        st.warning("Importe ao menos um planejado e um resultado.")
+        st.stop()
+
+    datas_planejado = set(
+        bases.loc[
+            bases["tipo"] == "planejado",
+            "data_operacional",
+        ].astype(str)
+    )
+    datas_resultado = set(
+        bases.loc[
+            bases["tipo"] == "resultado",
+            "data_operacional",
+        ].astype(str)
+    )
+
+    datas_completas = sorted(
+        datas_planejado & datas_resultado,
+        reverse=True,
+    )
+
+    if not datas_completas:
+        st.warning(
+            "Não existe uma data com planejado e resultado "
+            "salvos juntos."
+        )
+        st.stop()
+
+    cadastro = carregar_oficinas()
+
+    if cadastro.empty:
+        st.warning(
+            "Cadastre as oficinas para habilitar o painel do consultor."
+        )
+        st.stop()
+
+    st.subheader("Painel do Consultor")
+
+    col_data, col_consultor = st.columns(2)
+
+    with col_data:
+        data_selecionada = st.selectbox(
+            "Data analisada",
+            datas_completas,
+            format_func=lambda valor: pd.to_datetime(valor).strftime(
+                "%d/%m/%Y"
+            ),
+            key="data_painel_consultor",
+        )
+
+    conciliacao_dia = conciliar_bases(
+        carregar_base("planejado", data_selecionada),
+        carregar_base("resultado", data_selecionada),
+    )
+    conciliacao_dia.insert(
+        0,
+        "Data Operacional",
+        data_selecionada,
+    )
+    conciliacao_enriquecida = enriquecer_com_cadastro(
+        conciliacao_dia,
+        cadastro,
+    )
+
+    consultores_disponiveis = sorted(
+        {
+            texto_limpo(valor)
+            for valor in conciliacao_enriquecida["Consultor"]
+            if texto_limpo(valor)
+        }
+    )
+
+    with col_consultor:
+        consultor_selecionado = st.selectbox(
+            "Consultor",
+            consultores_disponiveis,
+            key="consultor_painel_dedicado",
+        )
+
+    base_consultor = conciliacao_enriquecida[
+        conciliacao_enriquecida["Consultor"]
+        == consultor_selecionado
+    ].copy()
+
+    regiao = REGIOES_CONSULTORES.get(
+        consultor_selecionado,
+        "Não definida",
+    )
+
+    st.info(
+        f"Consultor: **{consultor_selecionado}** · "
+        f"Região: **{regiao}** · "
+        f"Data: **{pd.to_datetime(data_selecionada).strftime('%d/%m/%Y')}** · "
+        f"{len(base_consultor)} atendimento(s)"
+    )
+
+    indicadores_consultor = calcular_indicadores(
+        base_consultor
+    )
+    escopo_consultor = (
+        f"painel_consultor_{data_selecionada}_"
+        f"{normalizar_texto(consultor_selecionado)}"
+    )
+
+    exibir_cards_indicadores(
+        indicadores_consultor,
+        prefixo=escopo_consultor,
+    )
+    exibir_detalhamento(
+        base_consultor,
+        escopo=escopo_consultor,
+        contexto=(
+            f"{consultor_selecionado} — {regiao} — "
+            f"{pd.to_datetime(data_selecionada).strftime('%d/%m/%Y')}"
+        ),
+    )
+
+    st.divider()
+    esquerda, direita = st.columns(2)
+
+    with esquerda:
+        st.subheader("Classificação dos atendimentos")
+
+        resumo = (
+            base_consultor["Classificação"]
+            .value_counts()
+            .reset_index()
+        )
+        resumo.columns = ["Classificação", "Quantidade"]
+
+        grafico = px.bar(
+            resumo,
+            x="Quantidade",
+            y="Classificação",
+            orientation="h",
+            text="Quantidade",
+        )
+        grafico.update_layout(
+            showlegend=False,
+            height=480,
+        )
+        st.plotly_chart(
+            grafico,
+            use_container_width=True,
+        )
+
+    with direita:
+        st.subheader("Resumo operacional")
+
+        st.metric(
+            "Tickets",
+            contar_unicos(base_consultor, "Ticket"),
+        )
+        st.metric(
+            "Oficinas",
+            contar_unicos(base_consultor, "Oficina"),
+        )
+        st.metric(
+            "Placas",
+            contar_unicos(base_consultor, "Placa"),
+        )
+
+    st.divider()
+    st.subheader("Ranking das oficinas do consultor")
+
+    ranking = (
+        base_consultor
+        .groupby("Oficina", dropna=False)
+        .agg(
+            Planejadas=(
+                "Classificação",
+                lambda serie: int(
+                    serie.isin(
+                        [
+                            "Executada planejada",
+                            "Improdutiva",
+                            "Cancelada",
+                            "No-show",
+                            "Status intermediário",
+                        ]
+                    ).sum()
+                ),
+            ),
+            Executadas=(
+                "Classificação",
+                lambda serie: int(
+                    (serie == "Executada planejada").sum()
+                ),
+            ),
+            Improdutivas=(
+                "Classificação",
+                lambda serie: int(
+                    (serie == "Improdutiva").sum()
+                ),
+            ),
+            No_show=(
+                "Classificação",
+                lambda serie: int(
+                    (serie == "No-show").sum()
+                ),
+            ),
+            Canceladas=(
+                "Classificação",
+                lambda serie: int(
+                    (serie == "Cancelada").sum()
+                ),
+            ),
+        )
+        .reset_index()
+    )
+
+    if not ranking.empty:
+        ranking["MCI (%)"] = ranking.apply(
+            lambda linha: (
+                linha["Executadas"] / linha["Planejadas"] * 100
+                if linha["Planejadas"]
+                else 0.0
+            ),
+            axis=1,
+        )
+        ranking["MD (%)"] = ranking.apply(
+            lambda linha: (
+                linha["Improdutivas"]
+                / (linha["Executadas"] + linha["Improdutivas"])
+                * 100
+                if (
+                    linha["Executadas"]
+                    + linha["Improdutivas"]
+                )
+                else 0.0
+            ),
+            axis=1,
+        )
+        ranking = ranking.sort_values(
+            ["Planejadas", "Oficina"],
+            ascending=[False, True],
+        )
+        ranking.insert(
+            0,
+            "Posição",
+            range(1, len(ranking) + 1),
+        )
+
+    st.dataframe(
+        ranking,
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 # =========================================================
@@ -1781,7 +2002,9 @@ elif pagina == "🏆 Ranking por Consultor":
     )
 
     cadastro = carregar_oficinas()
-    planejado = carregar_base("planejado", data_selecionada)
+    planejado = filtrar_somente_manutencoes(
+        carregar_base("planejado", data_selecionada)
+    )
 
     if cadastro.empty:
         st.warning("Cadastre as oficinas.")
@@ -1846,7 +2069,9 @@ elif pagina == "📞 Follow":
     )
 
     cadastro = carregar_oficinas()
-    planejado = carregar_base("planejado", data_selecionada)
+    planejado = filtrar_somente_manutencoes(
+        carregar_base("planejado", data_selecionada)
+    )
 
     if cadastro.empty:
         st.warning("Cadastre as oficinas.")
