@@ -519,8 +519,11 @@ def criar_chaves(df: pd.DataFrame) -> pd.DataFrame:
         & (df["Chave Placa"] == "")
     )
 
+    # O lado direito precisa ter exatamente a mesma quantidade de
+    # linhas selecionadas pela máscara. Usar o índice completo aqui
+    # provoca: "Must have equal len keys and value when setting with an iterable".
     df.loc[sem_identificador, "Chave Atendimento"] = (
-        "LINHA|" + df.index.astype(str)
+        "LINHA|" + df.index[sem_identificador].astype(str)
     )
 
     return df
@@ -1188,7 +1191,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 1.0 — Supabase, MCI, MD e conferência clicável"
+        "Versão 1.1 — Supabase, MCI, MD e conferência clicável"
     )
 
 
