@@ -1,3 +1,6 @@
+p_mci_md_consultores.py
+
+
 import io
 import re
 import unicodedata
@@ -63,6 +66,171 @@ MAPA_CONSULTORES_UF = {
     "MT": "Gleci Nunes",
     "MS": "Gleci Nunes",
 }
+
+REGIOES_CONSULTORES = {
+    "Oscar Barbosa": "Nordeste",
+    "Paulo Castro": "Sudeste",
+    "Fábio Silva": "Minas Gerais",
+    "Fábio Silva*": "Norte",
+    "Marcos Bispo": "Rio Grande do Sul / Santa Catarina",
+    "Roberto Rugel": "Paraná",
+    "Gleci Nunes": "Centro-Oeste",
+    "Não definido": "Não definida",
+}
+
+
+def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
+    planejadas = int(
+        conciliacao[
+            conciliacao["_merge"] != "right_only"
+        ].shape[0]
+    )
+
+    executadas_planejadas = int(
+        (
+            conciliacao["Classificação"]
+            == "Executada planejada"
+        ).sum()
+    )
+
+    improdutivas = int(
+        (
+            conciliacao["Classificação"]
+            == "Improdutiva"
+        ).sum()
+    )
+
+    canceladas = int(
+        (
+            conciliacao["Classificação"]
+            == "Cancelada"
+        ).sum()
+    )
+
+    no_show = int(
+        (
+            conciliacao["Classificação"]
+            == "No-show"
+        ).sum()
+    )
+
+    executadas_extras = int(
+        (
+            conciliacao["Classificação"]
+            == "Execução extra"
+        ).sum()
+    )
+
+    # MCI: percentual das atividades planejadas efetivamente executadas.
+    mci = (
+        executadas_planejadas / planejadas * 100
+        if planejadas
+        else 0.0
+    )
+
+    # MD: improdutivas em relação aos atendimentos com presença do técnico
+    # que terminaram executados ou improdutivos.
+    base_md = executadas_planejadas + improdutivas
+    md = (
+        improdutivas / base_md * 100
+        if base_md
+        else 0.0
+    )
+
+    indice_no_show = (
+        no_show / planejadas * 100
+        if planejadas
+        else 0.0
+    )
+
+    indice_cancelamento = (
+        canceladas / planejadas * 100
+        if planejadas
+        else 0.0
+    )
+
+    indice_execucao_total = (
+        (executadas_planejadas + executadas_extras)
+        / planejadas
+        * 100
+        if planejadas
+        else 0.0
+    )
+
+    return {
+        "Planejadas": planejadas,
+        "Executadas planejadas": executadas_planejadas,
+        "Improdutivas": improdutivas,
+        "Canceladas": canceladas,
+        "No-show": no_show,
+        "Executadas extras": executadas_extras,
+        "MCI": mci,
+        "MD": md,
+        "Índice no-show": indice_no_show,
+        "Índice cancelamento": indice_cancelamento,
+        "Execução total": indice_execucao_total,
+    }
+
+
+def exibir_cards_indicadores(indicadores: dict) -> None:
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+
+    col1.metric("Planejadas", indicadores["Planejadas"])
+    col2.metric(
+        "Executadas planejadas",
+        indicadores["Executadas planejadas"],
+    )
+    col3.metric("Improdutivas", indicadores["Improdutivas"])
+    col4.metric("Canceladas", indicadores["Canceladas"])
+    col5.metric("No-show", indicadores["No-show"])
+    col6.metric(
+        "Executadas extras",
+        indicadores["Executadas extras"],
+    )
+
+    st.markdown("#### Indicadores de desempenho")
+
+    i1, i2, i3, i4, i5 = st.columns(5)
+
+    i1.metric(
+        "MCI — Execução",
+        f'{indicadores["MCI"]:.1f}%',
+        help=(
+            "Executadas planejadas ÷ Planejadas. "
+            "Meta operacional: 90%."
+        ),
+    )
+
+    i2.metric(
+        "MD — Improdutividade",
+        f'{indicadores["MD"]:.1f}%',
+        help=(
+            "Improdutivas ÷ (Executadas planejadas + Improdutivas). "
+            "Meta: abaixo de 10%."
+        ),
+    )
+
+    i3.metric(
+        "Índice de no-show",
+        f'{indicadores["Índice no-show"]:.1f}%',
+        help="No-show ÷ Planejadas.",
+    )
+
+    i4.metric(
+        "Índice de cancelamento",
+        f'{indicadores["Índice cancelamento"]:.1f}%',
+        help="Canceladas ÷ Planejadas.",
+    )
+
+    i5.metric(
+        "Execução total",
+        f'{indicadores["Execução total"]:.1f}%',
+        help=(
+            "(Executadas planejadas + Executadas extras) "
+            "÷ Planejadas."
+        ),
+    )
+
 
 
 # =========================================================
@@ -855,7 +1023,7 @@ with st.sidebar:
     )
 
     st.divider()
-    st.caption("Versão 0.5.1 — Improdutiva e No-show")
+    st.caption("Versão 0.6.0 — MCI, MD e painel por consultor")
 
 
 # =========================================================
@@ -1010,6 +1178,7 @@ elif pagina == "📊 Painel de Controle":
     planejado_ontem = st.session_state.planejado_ontem
     resultado_ontem = st.session_state.resultado_ontem
     planejado_hoje = st.session_state.planejado_hoje
+    cadastro = st.session_state.cadastro_oficinas
 
     if planejado_ontem is None or resultado_ontem is None:
         st.warning(
@@ -1023,65 +1192,98 @@ elif pagina == "📊 Painel de Controle":
         resultado_ontem,
     )
 
-    planejadas = int(
-        conciliacao[
-            conciliacao["_merge"] != "right_only"
-        ].shape[0]
+    # =====================================================
+    # VISÃO GERAL — SEMPRE FIXA
+    # =====================================================
+
+    st.subheader("Visão geral da operação")
+
+    indicadores_gerais = calcular_indicadores(conciliacao)
+    exibir_cards_indicadores(indicadores_gerais)
+
+    st.caption(
+        "MCI = executadas planejadas ÷ planejadas. "
+        "MD = improdutivas ÷ (executadas planejadas + improdutivas)."
     )
 
-    executadas_planejadas = int(
-        (
-            conciliacao["Classificação"]
-            == "Executada planejada"
-        ).sum()
-    )
+    st.divider()
 
-    improdutivas = int(
-        (
-            conciliacao["Classificação"]
-            == "Improdutiva"
-        ).sum()
-    )
+    # =====================================================
+    # VISÃO POR CONSULTOR / REGIÃO
+    # =====================================================
 
-    canceladas = int(
-        (
-            conciliacao["Classificação"]
-            == "Cancelada"
-        ).sum()
-    )
+    st.subheader("Visão por consultor e região")
 
-    no_show = int(
-        (
-            conciliacao["Classificação"]
-            == "No-show"
-        ).sum()
-    )
+    if cadastro is None:
+        st.info(
+            "Importe o cadastro das oficinas para habilitar "
+            "a visão por consultor e região."
+        )
+        conciliacao_filtrada = conciliacao.copy()
+        consultor_selecionado = "Todos"
 
-    executadas_extras = int(
-        (
-            conciliacao["Classificação"]
-            == "Execução extra"
-        ).sum()
-    )
+    else:
+        conciliacao_enriquecida = enriquecer_com_cadastro(
+            conciliacao,
+            cadastro,
+        )
 
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+        consultores_disponiveis = sorted(
+            consultor
+            for consultor in conciliacao_enriquecida[
+                "Consultor"
+            ].dropna().unique().tolist()
+            if texto_limpo(consultor)
+        )
 
-    col1.metric("Planejadas", planejadas)
-    col2.metric("Executadas planejadas", executadas_planejadas)
-    col3.metric("Improdutivas", improdutivas)
-    col4.metric("Canceladas", canceladas)
-    col5.metric("No-show", no_show)
-    col6.metric("Executadas extras", executadas_extras)
+        consultor_selecionado = st.selectbox(
+            "Selecione o consultor",
+            ["Todos"] + consultores_disponiveis,
+        )
+
+        if consultor_selecionado == "Todos":
+            conciliacao_filtrada = conciliacao_enriquecida.copy()
+            st.caption(
+                "Exibindo todas as regiões. "
+                "O painel geral acima permanece fixo."
+            )
+        else:
+            conciliacao_filtrada = conciliacao_enriquecida[
+                conciliacao_enriquecida["Consultor"]
+                == consultor_selecionado
+            ].copy()
+
+            regiao = REGIOES_CONSULTORES.get(
+                consultor_selecionado,
+                "Não definida",
+            )
+
+            st.info(
+                f"Consultor: **{consultor_selecionado}** · "
+                f"Região: **{regiao}** · "
+                f"{len(conciliacao_filtrada)} atendimento(s)"
+            )
+
+        indicadores_consultor = calcular_indicadores(
+            conciliacao_filtrada
+        )
+
+        exibir_cards_indicadores(indicadores_consultor)
 
     st.divider()
 
     esquerda, direita = st.columns(2)
 
     with esquerda:
-        st.subheader("Classificação dos atendimentos")
+        titulo_grafico = "Classificação dos atendimentos"
+
+        if consultor_selecionado != "Todos":
+            titulo_grafico += f" — {consultor_selecionado}"
+
+        st.subheader(titulo_grafico)
 
         resumo = (
-            conciliacao["Classificação"]
+            conciliacao_filtrada["Classificação"]
             .value_counts()
             .reset_index()
         )
@@ -1119,15 +1321,31 @@ elif pagina == "📊 Painel de Controle":
             )
 
         else:
+            planejado_exibir = planejado_hoje.copy()
+
+            if (
+                cadastro is not None
+                and consultor_selecionado != "Todos"
+            ):
+                planejado_exibir = enriquecer_com_cadastro(
+                    planejado_hoje,
+                    cadastro,
+                )
+
+                planejado_exibir = planejado_exibir[
+                    planejado_exibir["Consultor"]
+                    == consultor_selecionado
+                ]
+
             st.metric(
                 "Atividades de hoje",
-                len(planejado_hoje),
+                len(planejado_exibir),
             )
 
             st.metric(
                 "Tickets de hoje",
                 contar_unicos(
-                    planejado_hoje,
+                    planejado_exibir,
                     "Ticket Jira",
                 ),
             )
@@ -1135,7 +1353,7 @@ elif pagina == "📊 Painel de Controle":
             st.metric(
                 "Oficinas de hoje",
                 contar_unicos(
-                    planejado_hoje,
+                    planejado_exibir,
                     "Oficina",
                 ),
             )
