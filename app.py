@@ -1306,7 +1306,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 1.5 — Somente manutenções, dashboard e painel do consultor"
+        "Versão 1.6 — Consolidado do consultor e somente manutenções"
     )
 
 
@@ -1699,81 +1699,135 @@ elif pagina == "👤 Painel do Consultor":
         )
         st.stop()
 
-    st.subheader("Painel do Consultor")
+    # Monta o consolidado de todas as datas completas.
+    consolidado = carregar_consolidado(datas_completas)
 
-    col_data, col_consultor = st.columns(2)
-
-    with col_data:
-        data_selecionada = st.selectbox(
-            "Data analisada",
-            datas_completas,
-            format_func=lambda valor: pd.to_datetime(valor).strftime(
-                "%d/%m/%Y"
-            ),
-            key="data_painel_consultor",
+    if consolidado.empty:
+        st.warning(
+            "Não foi possível montar o consolidado dos consultores."
         )
+        st.stop()
 
-    conciliacao_dia = conciliar_bases(
-        carregar_base("planejado", data_selecionada),
-        carregar_base("resultado", data_selecionada),
-    )
-    conciliacao_dia.insert(
-        0,
-        "Data Operacional",
-        data_selecionada,
-    )
-    conciliacao_enriquecida = enriquecer_com_cadastro(
-        conciliacao_dia,
+    consolidado_enriquecido = enriquecer_com_cadastro(
+        consolidado,
         cadastro,
     )
 
     consultores_disponiveis = sorted(
         {
             texto_limpo(valor)
-            for valor in conciliacao_enriquecida["Consultor"]
+            for valor in consolidado_enriquecido["Consultor"]
             if texto_limpo(valor)
         }
     )
 
-    with col_consultor:
-        consultor_selecionado = st.selectbox(
-            "Consultor",
-            consultores_disponiveis,
-            key="consultor_painel_dedicado",
+    if not consultores_disponiveis:
+        st.warning(
+            "Nenhum consultor foi identificado nas oficinas "
+            "relacionadas às manutenções."
         )
+        st.stop()
 
-    base_consultor = conciliacao_enriquecida[
-        conciliacao_enriquecida["Consultor"]
-        == consultor_selecionado
-    ].copy()
+    st.subheader("Painel do Consultor")
+
+    consultor_selecionado = st.selectbox(
+        "Consultor",
+        consultores_disponiveis,
+        key="consultor_painel_dedicado",
+    )
 
     regiao = REGIOES_CONSULTORES.get(
         consultor_selecionado,
         "Não definida",
     )
 
+    # =====================================================
+    # CONSOLIDADO DO CONSULTOR — SEMPRE FIXO
+    # =====================================================
+
+    base_consolidada_consultor = consolidado_enriquecido[
+        consolidado_enriquecido["Consultor"]
+        == consultor_selecionado
+    ].copy()
+
     st.info(
         f"Consultor: **{consultor_selecionado}** · "
-        f"Região: **{regiao}** · "
-        f"Data: **{pd.to_datetime(data_selecionada).strftime('%d/%m/%Y')}** · "
-        f"{len(base_consultor)} atendimento(s)"
+        f"Região: **{regiao}**"
     )
 
-    indicadores_consultor = calcular_indicadores(
-        base_consultor
+    st.subheader("Consolidado do consultor")
+    st.caption(
+        f"Acumulado de {len(datas_completas)} data(s) operacional(is), "
+        f"de {pd.to_datetime(min(datas_completas)).strftime('%d/%m/%Y')} "
+        f"até {pd.to_datetime(max(datas_completas)).strftime('%d/%m/%Y')}."
     )
-    escopo_consultor = (
-        f"painel_consultor_{data_selecionada}_"
+
+    indicadores_consolidados_consultor = calcular_indicadores(
+        base_consolidada_consultor
+    )
+
+    escopo_consolidado_consultor = (
+        "consolidado_consultor_"
         f"{normalizar_texto(consultor_selecionado)}"
     )
 
     exibir_cards_indicadores(
-        indicadores_consultor,
-        prefixo=escopo_consultor,
+        indicadores_consolidados_consultor,
+        prefixo=escopo_consolidado_consultor,
     )
+
     exibir_detalhamento(
-        base_consultor,
-        escopo=escopo_consultor,
+        base_consolidada_consultor,
+        escopo=escopo_consolidado_consultor,
+        contexto=(
+            f"Consolidado de {consultor_selecionado} — {regiao}"
+        ),
+    )
+
+    # =====================================================
+    # VISÃO DIÁRIA DO CONSULTOR
+    # =====================================================
+
+    st.divider()
+    st.subheader("Visão diária do consultor")
+
+    data_selecionada = st.selectbox(
+        "Data analisada",
+        datas_completas,
+        format_func=lambda valor: pd.to_datetime(valor).strftime(
+            "%d/%m/%Y"
+        ),
+        key="data_painel_consultor",
+    )
+
+    base_dia_consultor = base_consolidada_consultor[
+        base_consolidada_consultor["Data Operacional"].astype(str)
+        == str(data_selecionada)
+    ].copy()
+
+    st.caption(
+        f"{consultor_selecionado} · {regiao} · "
+        f"{pd.to_datetime(data_selecionada).strftime('%d/%m/%Y')} · "
+        f"{len(base_dia_consultor)} atendimento(s)"
+    )
+
+    indicadores_dia_consultor = calcular_indicadores(
+        base_dia_consultor
+    )
+
+    escopo_dia_consultor = (
+        f"dia_consultor_{data_selecionada}_"
+        f"{normalizar_texto(consultor_selecionado)}"
+    )
+
+    exibir_cards_indicadores(
+        indicadores_dia_consultor,
+        prefixo=escopo_dia_consultor,
+    )
+
+    exibir_detalhamento(
+        base_dia_consultor,
+        escopo=escopo_dia_consultor,
         contexto=(
             f"{consultor_selecionado} — {regiao} — "
             f"{pd.to_datetime(data_selecionada).strftime('%d/%m/%Y')}"
@@ -1784,10 +1838,10 @@ elif pagina == "👤 Painel do Consultor":
     esquerda, direita = st.columns(2)
 
     with esquerda:
-        st.subheader("Classificação dos atendimentos")
+        st.subheader("Classificação do dia")
 
         resumo = (
-            base_consultor["Classificação"]
+            base_dia_consultor["Classificação"]
             .value_counts()
             .reset_index()
         )
@@ -1810,26 +1864,30 @@ elif pagina == "👤 Painel do Consultor":
         )
 
     with direita:
-        st.subheader("Resumo operacional")
+        st.subheader("Resumo operacional do dia")
 
         st.metric(
             "Tickets",
-            contar_unicos(base_consultor, "Ticket"),
+            contar_unicos(base_dia_consultor, "Ticket"),
         )
         st.metric(
             "Oficinas",
-            contar_unicos(base_consultor, "Oficina"),
+            contar_unicos(base_dia_consultor, "Oficina"),
         )
         st.metric(
             "Placas",
-            contar_unicos(base_consultor, "Placa"),
+            contar_unicos(base_dia_consultor, "Placa"),
         )
 
+    # =====================================================
+    # RANKING CONSOLIDADO DAS OFICINAS DO CONSULTOR
+    # =====================================================
+
     st.divider()
-    st.subheader("Ranking das oficinas do consultor")
+    st.subheader("Ranking consolidado das oficinas")
 
     ranking = (
-        base_consultor
+        base_consolidada_consultor
         .groupby("Oficina", dropna=False)
         .agg(
             Planejadas=(
@@ -1870,6 +1928,12 @@ elif pagina == "👤 Painel do Consultor":
                     (serie == "Cancelada").sum()
                 ),
             ),
+            Extras=(
+                "Classificação",
+                lambda serie: int(
+                    (serie == "Execução extra").sum()
+                ),
+            ),
         )
         .reset_index()
     )
@@ -1883,10 +1947,14 @@ elif pagina == "👤 Painel do Consultor":
             ),
             axis=1,
         )
+
         ranking["MD (%)"] = ranking.apply(
             lambda linha: (
                 linha["Improdutivas"]
-                / (linha["Executadas"] + linha["Improdutivas"])
+                / (
+                    linha["Executadas"]
+                    + linha["Improdutivas"]
+                )
                 * 100
                 if (
                     linha["Executadas"]
@@ -1896,10 +1964,12 @@ elif pagina == "👤 Painel do Consultor":
             ),
             axis=1,
         )
+
         ranking = ranking.sort_values(
             ["Planejadas", "Oficina"],
             ascending=[False, True],
         )
+
         ranking.insert(
             0,
             "Posição",
