@@ -1,6 +1,3 @@
-p_mci_md_consultores.py
-
-
 import io
 import re
 import unicodedata
