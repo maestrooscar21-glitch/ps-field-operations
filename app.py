@@ -777,6 +777,7 @@ def enriquecer_com_cadastro(
 def registro_atividade(
     linha: pd.Series,
     data_operacional: str,
+    incluir_status: bool,
 ) -> dict:
     dados = {
         str(coluna): texto_limpo(valor)
@@ -789,7 +790,7 @@ def registro_atividade(
         }
     }
 
-    return {
+    registro = {
         "data_operacional": data_operacional,
         "chave_atendimento": texto_limpo(linha["Chave Atendimento"]),
         "ticket_jira": texto_limpo(linha.get("Ticket Jira", "")),
@@ -802,17 +803,24 @@ def registro_atividade(
         "tipo_atividade": texto_limpo(
             linha.get("Tipo de Atividade", "")
         ),
-        "status_atividade": texto_limpo(
-            linha.get("Status da Atividade", "")
-        ),
         "recurso": texto_limpo(linha.get("Recurso", "")),
         "dados": dados,
     }
+
+    # A tabela de resultado possui status_atividade.
+    # A tabela de planejado pode não possuir essa coluna.
+    if incluir_status:
+        registro["status_atividade"] = texto_limpo(
+            linha.get("Status da Atividade", "")
+        )
+
+    return registro
 
 
 def preparar_atividades_para_banco(
     df: pd.DataFrame,
     data_operacional: str,
+    incluir_status: bool,
 ) -> list[dict]:
     base = criar_chaves(df)
 
@@ -824,7 +832,11 @@ def preparar_atividades_para_banco(
     )
 
     return [
-        registro_atividade(linha, data_operacional)
+        registro_atividade(
+            linha,
+            data_operacional,
+            incluir_status,
+        )
         for _, linha in base.iterrows()
     ]
 
@@ -839,7 +851,11 @@ def salvar_base(
     data_texto = data_operacional.isoformat()
     tabela = TABELA_POR_TIPO[tipo]
 
-    registros = preparar_atividades_para_banco(df, data_texto)
+    registros = preparar_atividades_para_banco(
+        df,
+        data_texto,
+        incluir_status=(tipo == "resultado"),
+    )
 
     # Substituição segura da base da mesma data.
     cliente.table(tabela).delete().eq(
@@ -1191,7 +1207,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 1.1 — Supabase, MCI, MD e conferência clicável"
+        "Versão 1.2 — Supabase, MCI, MD e conferência clicável"
     )
 
 
