@@ -628,6 +628,9 @@ def conciliar_bases(
         .reset_index()
     )
 
+    if "Status da Atividade" not in planejado.columns:
+        planejado["Status da Atividade"] = ""
+
     resumo_planejado = (
         planejado
         .groupby("Chave Atendimento", dropna=False)
@@ -636,6 +639,7 @@ def conciliar_bases(
             Placa_planejada=("Placa", "first"),
             OS_planejada=("OS", juntar_unicos),
             Oficina_planejada=("Oficina", "first"),
+            Status_planejado=("Status da Atividade", juntar_unicos),
             Qtd_planejada=("Chave Atendimento", "size"),
         )
         .reset_index()
@@ -650,25 +654,36 @@ def conciliar_bases(
 
     def classificar(linha) -> str:
         origem = linha["_merge"]
-        status = linha.get("Status_resultado", "")
+        status_resultado = linha.get("Status_resultado", "")
+        status_planejado = linha.get("Status_planejado", "")
+
+        # Se a manutenção já estava cancelada no arquivo planejado,
+        # ela não entra como cancelamento do dia, no-show ou planejada válida.
+        if (
+            origem in {"left_only", "both"}
+            and status_cancelado(status_planejado)
+        ):
+            return "Cancelada no planejamento"
 
         if origem == "left_only":
             return "No-show"
 
         if origem == "right_only":
-            if status_improdutivo(status):
+            if status_improdutivo(status_resultado):
                 return "Improdutiva extra"
-            if status_cancelado(status):
+            if status_cancelado(status_resultado):
                 return "Cancelada extra"
-            if status_executado(status):
+            if status_executado(status_resultado):
                 return "Execução extra"
             return "Evento extra"
 
-        if status_improdutivo(status):
+        # Só conta como cancelada quando estava válida no planejado
+        # e apareceu cancelada posteriormente no relatório de resultado.
+        if status_improdutivo(status_resultado):
             return "Improdutiva"
-        if status_cancelado(status):
+        if status_cancelado(status_resultado):
             return "Cancelada"
-        if status_executado(status):
+        if status_executado(status_resultado):
             return "Executada planejada"
 
         return "Status intermediário"
@@ -705,7 +720,13 @@ def conciliar_bases(
 
 def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
     planejadas = int(
-        conciliacao[conciliacao["_merge"] != "right_only"].shape[0]
+        conciliacao[
+            (conciliacao["_merge"] != "right_only")
+            & (
+                conciliacao["Classificação"]
+                != "Cancelada no planejamento"
+            )
+        ].shape[0]
     )
     executadas_planejadas = int(
         (conciliacao["Classificação"] == "Executada planejada").sum()
@@ -1159,7 +1180,11 @@ def filtrar_detalhes(
 ) -> pd.DataFrame:
     if filtro == "Planejadas":
         return conciliacao[
-            conciliacao["_merge"] != "right_only"
+            (conciliacao["_merge"] != "right_only")
+            & (
+                conciliacao["Classificação"]
+                != "Cancelada no planejamento"
+            )
         ].copy()
 
     return conciliacao[
@@ -1208,6 +1233,7 @@ def exibir_detalhamento(
         "OS_planejada",
         "OS_resultado",
         "Troca de OS",
+        "Status_planejado",
         "Status_resultado",
         "Qtd_planejada",
         "Qtd_resultado",
@@ -1306,7 +1332,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 1.6 — Consolidado do consultor e somente manutenções"
+        "Versão 1.7 — Cancelamentos válidos após o planejamento"
     )
 
 
