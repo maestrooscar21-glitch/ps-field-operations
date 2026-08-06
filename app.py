@@ -1006,12 +1006,50 @@ def excluir_base(tipo: str, data_operacional: str) -> None:
     ).execute()
 
 
+def carregar_consolidado(datas: list[str]) -> pd.DataFrame:
+    """Concilia todas as datas completas e cria a visão histórica geral."""
+    partes = []
+
+    for data_operacional in datas:
+        planejado = carregar_base("planejado", data_operacional)
+        resultado = carregar_base("resultado", data_operacional)
+
+        if planejado.empty and resultado.empty:
+            continue
+
+        conciliacao_data = conciliar_bases(
+            planejado,
+            resultado,
+        )
+        conciliacao_data.insert(
+            0,
+            "Data Operacional",
+            data_operacional,
+        )
+        partes.append(conciliacao_data)
+
+    if not partes:
+        return pd.DataFrame()
+
+    return pd.concat(
+        partes,
+        ignore_index=True,
+        sort=False,
+    )
+
+
 # =========================================================
 # APRESENTAÇÃO E DETALHAMENTO CLICÁVEL
 # =========================================================
 
-def definir_filtro_detalhe(classificacao: str) -> None:
-    st.session_state["filtro_detalhe"] = classificacao
+def definir_filtro_detalhe(
+    escopo: str,
+    classificacao: str,
+) -> None:
+    st.session_state["detalhe_ativo"] = {
+        "escopo": escopo,
+        "filtro": classificacao,
+    }
 
 
 def exibir_card_clicavel(
@@ -1025,9 +1063,9 @@ def exibir_card_clicavel(
 
     coluna.button(
         "🔎 Ver OS",
-        key=f"{prefixo}_{filtro}",
+        key=f"{prefixo}_{normalizar_texto(filtro)}",
         on_click=definir_filtro_detalhe,
-        args=(filtro,),
+        args=(prefixo, filtro),
         use_container_width=True,
     )
 
@@ -1069,7 +1107,8 @@ def exibir_cards_indicadores(
         f'{indicadores["MD"]:.1f}%',
         help=(
             "Improdutivas ÷ "
-            "(Executadas planejadas + Improdutivas). Meta: abaixo de 10%."
+            "(Executadas planejadas + Improdutivas). "
+            "Meta: abaixo de 10%."
         ),
     )
     i3.metric(
@@ -1100,26 +1139,44 @@ def filtrar_detalhes(
     ].copy()
 
 
-def exibir_detalhamento(conciliacao: pd.DataFrame) -> None:
-    filtro = st.session_state.get("filtro_detalhe")
+def exibir_detalhamento(
+    conciliacao: pd.DataFrame,
+    escopo: str,
+    contexto: str,
+) -> None:
+    detalhe_ativo = st.session_state.get("detalhe_ativo")
+
+    if not detalhe_ativo:
+        return
+
+    if detalhe_ativo.get("escopo") != escopo:
+        return
+
+    filtro = detalhe_ativo.get("filtro")
 
     if not filtro:
         return
 
-    detalhe = filtrar_detalhes(conciliacao, filtro)
+    detalhe = filtrar_detalhes(
+        conciliacao,
+        filtro,
+    )
 
-    st.divider()
+    st.markdown("---")
     st.subheader(f"🔎 Conferência das OS — {filtro}")
     st.caption(
-        f"Foram encontradas {len(detalhe)} OS/atendimentos neste filtro. "
-        "Use esta tabela para validar se a classificação está correta."
+        f"Contexto: {contexto}. Foram encontrados "
+        f"{len(detalhe)} atendimento(s)."
     )
 
     colunas = [
+        "Data Operacional",
         "Classificação",
         "Ticket",
         "Placa",
         "Oficina",
+        "Consultor",
+        "UF-base",
         "OS_planejada",
         "OS_resultado",
         "Troca de OS",
@@ -1127,8 +1184,11 @@ def exibir_detalhamento(conciliacao: pd.DataFrame) -> None:
         "Qtd_planejada",
         "Qtd_resultado",
     ]
-
-    colunas = [c for c in colunas if c in detalhe.columns]
+    colunas = [
+        coluna
+        for coluna in colunas
+        if coluna in detalhe.columns
+    ]
 
     st.dataframe(
         detalhe[colunas],
@@ -1140,20 +1200,31 @@ def exibir_detalhamento(conciliacao: pd.DataFrame) -> None:
     a, b = st.columns([1, 4])
 
     if a.button(
-        "✖ Limpar filtro",
+        "✖ Fechar",
+        key=f"fechar_{escopo}",
         use_container_width=True,
     ):
-        st.session_state["filtro_detalhe"] = None
+        st.session_state["detalhe_ativo"] = None
         st.rerun()
+
+    nome_filtro = (
+        normalizar_texto(filtro)
+        .lower()
+        .replace(" ", "_")
+    )
 
     b.download_button(
         "⬇️ Baixar OS filtradas em Excel",
-        data=dataframe_para_excel(detalhe, "OS_filtradas"),
-        file_name=f"os_{normalizar_texto(filtro).lower().replace(' ', '_')}.xlsx",
+        data=dataframe_para_excel(
+            detalhe,
+            "OS_filtradas",
+        ),
+        file_name=f"os_{nome_filtro}.xlsx",
         mime=(
             "application/vnd.openxmlformats-officedocument."
             "spreadsheetml.sheet"
         ),
+        key=f"download_{escopo}_{nome_filtro}",
         use_container_width=True,
     )
 
@@ -1198,7 +1269,6 @@ with st.sidebar:
             "📊 Painel de Controle",
             "📥 Importações",
             "🗂 Bases Salvas",
-            "🔄 Conciliação",
             "🏢 Cadastro de Oficinas",
             "🏆 Ranking por Consultor",
             "📞 Follow",
@@ -1207,7 +1277,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 1.2 — Supabase, MCI, MD e conferência clicável"
+        "Versão 1.3 — Consolidado geral, visão diária e regiões"
     )
 
 
@@ -1424,9 +1494,56 @@ elif pagina == "📊 Painel de Controle":
 
     if not datas_completas:
         st.warning(
-            "Não existe uma data com planejado e resultado salvos juntos."
+            "Não existe uma data com planejado e resultado "
+            "salvos juntos."
         )
         st.stop()
+
+    cadastro = carregar_oficinas()
+    consolidado = carregar_consolidado(datas_completas)
+
+    if consolidado.empty:
+        st.warning("Não foi possível montar o consolidado geral.")
+        st.stop()
+
+    if not cadastro.empty:
+        consolidado_enriquecido = enriquecer_com_cadastro(
+            consolidado,
+            cadastro,
+        )
+    else:
+        consolidado_enriquecido = consolidado.copy()
+
+    # =====================================================
+    # CONSOLIDADO GERAL — SEMPRE FIXO
+    # =====================================================
+
+    st.subheader("Visão consolidada geral")
+    st.caption(
+        f"Acumulado de {len(datas_completas)} data(s) operacional(is), "
+        f"de {pd.to_datetime(min(datas_completas)).strftime('%d/%m/%Y')} "
+        f"até {pd.to_datetime(max(datas_completas)).strftime('%d/%m/%Y')}."
+    )
+
+    indicadores_consolidados = calcular_indicadores(
+        consolidado_enriquecido
+    )
+    exibir_cards_indicadores(
+        indicadores_consolidados,
+        prefixo="consolidado_geral",
+    )
+    exibir_detalhamento(
+        consolidado_enriquecido,
+        escopo="consolidado_geral",
+        contexto="Consolidado geral de todas as datas completas",
+    )
+
+    # =====================================================
+    # VISÃO DA DATA SELECIONADA
+    # =====================================================
+
+    st.divider()
+    st.subheader("Visão por dia")
 
     data_selecionada = st.selectbox(
         "Data analisada",
@@ -1436,44 +1553,46 @@ elif pagina == "📊 Painel de Controle":
         ),
     )
 
-    planejado = carregar_base("planejado", data_selecionada)
-    resultado = carregar_base("resultado", data_selecionada)
-    cadastro = carregar_oficinas()
+    conciliacao_dia = consolidado_enriquecido[
+        consolidado_enriquecido["Data Operacional"].astype(str)
+        == str(data_selecionada)
+    ].copy()
 
-    conciliacao = conciliar_bases(planejado, resultado)
+    indicadores_dia = calcular_indicadores(conciliacao_dia)
+    escopo_dia = f"dia_{data_selecionada}"
 
-    st.subheader("Visão geral da operação")
-    indicadores_gerais = calcular_indicadores(conciliacao)
     exibir_cards_indicadores(
-        indicadores_gerais,
-        prefixo="geral",
+        indicadores_dia,
+        prefixo=escopo_dia,
+    )
+    exibir_detalhamento(
+        conciliacao_dia,
+        escopo=escopo_dia,
+        contexto=(
+            "Data "
+            f"{pd.to_datetime(data_selecionada).strftime('%d/%m/%Y')}"
+        ),
     )
 
-    st.caption(
-        "Clique em “Ver OS” abaixo de qualquer número para abrir "
-        "imediatamente a base filtrada e conferir quais OS formam o total."
-    )
+    # =====================================================
+    # VISÃO POR CONSULTOR E REGIÃO NA DATA SELECIONADA
+    # =====================================================
 
     st.divider()
     st.subheader("Visão por consultor e região")
 
-    conciliacao_filtrada = conciliacao.copy()
-    consultor_selecionado = "Todos"
-
     if cadastro.empty:
         st.info(
-            "Cadastre as oficinas para habilitar o filtro por consultor."
+            "Cadastre as oficinas para habilitar a visão "
+            "por consultor e região."
         )
+        conciliacao_regional = conciliacao_dia.copy()
+        consultor_selecionado = "Todos"
     else:
-        conciliacao_enriquecida = enriquecer_com_cadastro(
-            conciliacao,
-            cadastro,
-        )
-
         consultores_disponiveis = sorted(
             {
                 texto_limpo(valor)
-                for valor in conciliacao_enriquecida["Consultor"]
+                for valor in conciliacao_dia["Consultor"]
                 if texto_limpo(valor)
             }
         )
@@ -1484,38 +1603,53 @@ elif pagina == "📊 Painel de Controle":
         )
 
         if consultor_selecionado == "Todos":
-            conciliacao_filtrada = conciliacao_enriquecida
+            conciliacao_regional = conciliacao_dia.copy()
             st.caption(
-                "Todos os consultores. A visão geral acima permanece fixa."
+                "Todas as regiões da data selecionada."
             )
         else:
-            conciliacao_filtrada = conciliacao_enriquecida[
-                conciliacao_enriquecida["Consultor"]
+            conciliacao_regional = conciliacao_dia[
+                conciliacao_dia["Consultor"]
                 == consultor_selecionado
             ].copy()
 
             st.info(
                 f"Consultor: **{consultor_selecionado}** · "
-                f"Região: **{REGIOES_CONSULTORES.get(consultor_selecionado, 'Não definida')}** · "
-                f"{len(conciliacao_filtrada)} atendimento(s)"
+                f"Região: **"
+                f"{REGIOES_CONSULTORES.get(consultor_selecionado, 'Não definida')}"
+                f"** · {len(conciliacao_regional)} atendimento(s)"
             )
 
-        indicadores_consultor = calcular_indicadores(
-            conciliacao_filtrada
+        indicadores_regionais = calcular_indicadores(
+            conciliacao_regional
         )
+        escopo_regional = (
+            f"regiao_{data_selecionada}_"
+            f"{normalizar_texto(consultor_selecionado)}"
+        )
+
         exibir_cards_indicadores(
-            indicadores_consultor,
-            prefixo=f"consultor_{normalizar_texto(consultor_selecionado)}",
+            indicadores_regionais,
+            prefixo=escopo_regional,
+        )
+        exibir_detalhamento(
+            conciliacao_regional,
+            escopo=escopo_regional,
+            contexto=(
+                f"{consultor_selecionado} — "
+                f"{REGIOES_CONSULTORES.get(consultor_selecionado, 'Todas as regiões')} "
+                f"em {pd.to_datetime(data_selecionada).strftime('%d/%m/%Y')}"
+            ),
         )
 
     st.divider()
     esquerda, direita = st.columns(2)
 
     with esquerda:
-        st.subheader("Classificação dos atendimentos")
+        st.subheader("Classificação da visão regional")
 
         resumo = (
-            conciliacao_filtrada["Classificação"]
+            conciliacao_regional["Classificação"]
             .value_counts()
             .reset_index()
         )
@@ -1538,120 +1672,24 @@ elif pagina == "📊 Painel de Controle":
         )
 
     with direita:
-        st.subheader("Resumo da data")
+        st.subheader("Resumo da data selecionada")
 
-        st.metric("Planejado", len(planejado))
-        st.metric("Resultado", len(resultado))
         st.metric(
-            "Tickets planejados",
-            contar_unicos(planejado, "Ticket Jira"),
+            "Atendimentos conciliados",
+            len(conciliacao_dia),
         )
         st.metric(
-            "Oficinas planejadas",
-            contar_unicos(planejado, "Oficina"),
+            "Tickets",
+            contar_unicos(conciliacao_dia, "Ticket"),
         )
-
-    # O detalhe respeita a visão atualmente exibida:
-    # geral quando Todos, ou somente o consultor escolhido.
-    exibir_detalhamento(conciliacao_filtrada)
-
-
-# =========================================================
-# CONCILIAÇÃO
-# =========================================================
-
-elif pagina == "🔄 Conciliação":
-    exigir_supabase()
-
-    bases = listar_bases()
-
-    if bases.empty:
-        st.warning("Não existem bases salvas.")
-        st.stop()
-
-    datas_planejado = set(
-        bases.loc[
-            bases["tipo"] == "planejado",
-            "data_operacional",
-        ].astype(str)
-    )
-    datas_resultado = set(
-        bases.loc[
-            bases["tipo"] == "resultado",
-            "data_operacional",
-        ].astype(str)
-    )
-    datas = sorted(datas_planejado & datas_resultado, reverse=True)
-
-    if not datas:
-        st.warning("Nenhuma data completa para conciliar.")
-        st.stop()
-
-    data_selecionada = st.selectbox(
-        "Data",
-        datas,
-        format_func=lambda valor: pd.to_datetime(valor).strftime(
-            "%d/%m/%Y"
-        ),
-    )
-
-    conciliacao = conciliar_bases(
-        carregar_base("planejado", data_selecionada),
-        carregar_base("resultado", data_selecionada),
-    )
-
-    classificacoes = sorted(
-        conciliacao["Classificação"].unique().tolist()
-    )
-
-    filtro = st.multiselect(
-        "Classificação",
-        classificacoes,
-        default=classificacoes,
-    )
-
-    somente_troca = st.checkbox(
-        "Somente atendimentos com troca de OS"
-    )
-
-    tabela = conciliacao[
-        conciliacao["Classificação"].isin(filtro)
-    ].copy()
-
-    if somente_troca:
-        tabela = tabela[tabela["Troca de OS"] == "Sim"]
-
-    colunas = [
-        "Classificação",
-        "Ticket",
-        "Placa",
-        "Oficina",
-        "OS_planejada",
-        "OS_resultado",
-        "Troca de OS",
-        "Status_resultado",
-        "Qtd_planejada",
-        "Qtd_resultado",
-    ]
-    colunas = [c for c in colunas if c in tabela.columns]
-
-    st.dataframe(
-        tabela[colunas],
-        use_container_width=True,
-        hide_index=True,
-        height=620,
-    )
-
-    st.download_button(
-        "⬇️ Baixar conciliação",
-        data=dataframe_para_excel(tabela, "Conciliacao"),
-        file_name=f"conciliacao_{data_selecionada}.xlsx",
-        mime=(
-            "application/vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
-        ),
-        use_container_width=True,
-    )
+        st.metric(
+            "Oficinas",
+            contar_unicos(conciliacao_dia, "Oficina"),
+        )
+        st.metric(
+            "Consultores com atendimento",
+            contar_unicos(conciliacao_dia, "Consultor"),
+        )
 
 
 # =========================================================
