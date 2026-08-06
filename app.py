@@ -807,9 +807,14 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
     executadas_planejadas = int(
         (conciliacao["Classificação"] == "Executada planejada").sum()
     )
-    improdutivas = int(
+    improdutivas_planejadas = int(
         (conciliacao["Classificação"] == "Improdutiva").sum()
     )
+    improdutivas_extras = int(
+        (conciliacao["Classificação"] == "Improdutiva extra").sum()
+    )
+    improdutivas = improdutivas_planejadas + improdutivas_extras
+
     canceladas = int(
         (conciliacao["Classificação"] == "Cancelada").sum()
     )
@@ -820,19 +825,29 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         (conciliacao["Classificação"] == "Execução extra").sum()
     )
 
+    # MCI continua medindo aderência ao agendamento:
+    # executadas agendadas ÷ manutenções agendadas.
     mci = (
         executadas_planejadas / planejadas * 100
         if planejadas
         else 0.0
     )
 
-    base_md = executadas_planejadas + improdutivas
+    # MD passa a medir toda a improdutividade ocorrida no campo,
+    # incluindo improdutivas extras.
+    base_md = (
+        executadas_planejadas
+        + executadas_extras
+        + improdutivas
+    )
     md = improdutivas / base_md * 100 if base_md else 0.0
 
     return {
         "Planejadas": planejadas,
         "Executadas planejadas": executadas_planejadas,
         "Improdutivas": improdutivas,
+        "Improdutivas agendadas": improdutivas_planejadas,
+        "Improdutivas extras": improdutivas_extras,
         "Canceladas": canceladas,
         "No-show": no_show,
         "Executadas extras": executadas_extras,
@@ -1202,19 +1217,46 @@ def exibir_cards_indicadores(
     colunas = st.columns(6)
 
     configuracoes = [
-        ("Planejadas", "Planejadas"),
-        ("Executadas planejadas", "Executada planejada"),
-        ("Improdutivas", "Improdutiva"),
-        ("Canceladas", "Cancelada"),
-        ("No-show", "No-show"),
-        ("Executadas extras", "Execução extra"),
+        (
+            "Manutenções agendadas",
+            "Planejadas",
+            "Manutenções agendadas",
+        ),
+        (
+            "Agendadas executadas",
+            "Executadas planejadas",
+            "Executada planejada",
+        ),
+        (
+            "Improdutivas",
+            "Improdutivas",
+            "Improdutivas",
+        ),
+        (
+            "Canceladas",
+            "Canceladas",
+            "Cancelada",
+        ),
+        (
+            "No-show",
+            "No-show",
+            "No-show",
+        ),
+        (
+            "Executadas extras",
+            "Executadas extras",
+            "Execução extra",
+        ),
     ]
 
-    for coluna, (titulo, filtro) in zip(colunas, configuracoes):
+    for coluna, (rotulo, chave_indicador, filtro) in zip(
+        colunas,
+        configuracoes,
+    ):
         exibir_card_clicavel(
             coluna,
-            titulo,
-            indicadores[titulo],
+            rotulo,
+            indicadores[chave_indicador],
             filtro,
             prefixo,
         )
@@ -1225,14 +1267,15 @@ def exibir_cards_indicadores(
     i1.metric(
         "MCI — Execução",
         f'{indicadores["MCI"]:.1f}%',
-        help="Executadas planejadas ÷ Planejadas. Meta: 90%.",
+        help="Agendadas executadas ÷ Manutenções agendadas. Meta: 90%.",
     )
     i2.metric(
         "MD — Improdutividade",
         f'{indicadores["MD"]:.1f}%',
         help=(
-            "Improdutivas ÷ "
-            "(Executadas planejadas + Improdutivas). "
+            "Improdutivas totais ÷ "
+            "(Agendadas executadas + Executadas extras + "
+            "Improdutivas totais). Inclui improdutivas extras. "
             "Meta: abaixo de 10%."
         ),
     )
@@ -1254,12 +1297,19 @@ def filtrar_detalhes(
     conciliacao: pd.DataFrame,
     filtro: str,
 ) -> pd.DataFrame:
-    if filtro == "Planejadas":
+    if filtro in {"Planejadas", "Manutenções agendadas"}:
         return conciliacao[
             (conciliacao["_merge"] != "right_only")
             & (
                 conciliacao["Classificação"]
                 != "Cancelada no planejamento"
+            )
+        ].copy()
+
+    if filtro == "Improdutivas":
+        return conciliacao[
+            conciliacao["Classificação"].isin(
+                ["Improdutiva", "Improdutiva extra"]
             )
         ].copy()
 
@@ -1409,7 +1459,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 1.8 — Contagem por OS e auditoria da classificação"
+        "Versão 1.9 — Improdutivas totais e nomenclatura de manutenções"
     )
 
 
@@ -1650,7 +1700,7 @@ elif pagina == "📊 Dashboard Executivo":
     # CONSOLIDADO GERAL — SEMPRE FIXO
     # =====================================================
 
-    st.subheader("Visão consolidada geral")
+    st.subheader("Visão consolidada geral de manutenções")
     st.caption(
         f"Acumulado de {len(datas_completas)} data(s) operacional(is), "
         f"de {pd.to_datetime(min(datas_completas)).strftime('%d/%m/%Y')} "
@@ -1667,7 +1717,7 @@ elif pagina == "📊 Dashboard Executivo":
     exibir_detalhamento(
         consolidado_enriquecido,
         escopo="consolidado_geral",
-        contexto="Consolidado geral de todas as datas completas",
+        contexto="Consolidado geral de manutenções de todas as datas completas",
     )
 
     # =====================================================
@@ -2016,7 +2066,9 @@ elif pagina == "👤 Painel do Consultor":
             Improdutivas=(
                 "Classificação",
                 lambda serie: int(
-                    (serie == "Improdutiva").sum()
+                    serie.isin(
+                        ["Improdutiva", "Improdutiva extra"]
+                    ).sum()
                 ),
             ),
             No_show=(
