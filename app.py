@@ -524,17 +524,27 @@ def criar_chaves(df: pd.DataFrame) -> pd.DataFrame:
     df["Chave Placa"] = df["Placa"].apply(normalizar_texto)
     df["Chave OS"] = df["OS"].apply(normalizar_texto)
 
-    df["Chave Atendimento"] = (
-        df["Chave Ticket"] + "|" + df["Chave Placa"]
+    # Os indicadores do painel são baseados em OS.
+    # Quando houver OS, ela será a chave principal. A regra anterior
+    # usava Ticket + Placa e podia agrupar OS diferentes.
+    possui_os = df["Chave OS"] != ""
+
+    df["Chave Atendimento"] = ""
+
+    df.loc[possui_os, "Chave Atendimento"] = (
+        "OS|"
+        + df.loc[possui_os, "Chave OS"]
+        + "|"
+        + df.loc[possui_os, "Chave Placa"]
     )
 
-    sem_ticket = df["Chave Ticket"] == ""
+    sem_os = ~possui_os
 
-    df.loc[sem_ticket, "Chave Atendimento"] = (
-        "OS|"
-        + df.loc[sem_ticket, "Chave OS"]
+    df.loc[sem_os, "Chave Atendimento"] = (
+        "TICKET|"
+        + df.loc[sem_os, "Chave Ticket"]
         + "|"
-        + df.loc[sem_ticket, "Chave Placa"]
+        + df.loc[sem_os, "Chave Placa"]
     )
 
     sem_identificador = (
@@ -543,9 +553,6 @@ def criar_chaves(df: pd.DataFrame) -> pd.DataFrame:
         & (df["Chave Placa"] == "")
     )
 
-    # O lado direito precisa ter exatamente a mesma quantidade de
-    # linhas selecionadas pela máscara. Usar o índice completo aqui
-    # provoca: "Must have equal len keys and value when setting with an iterable".
     df.loc[sem_identificador, "Chave Atendimento"] = (
         "LINHA|" + df.index[sem_identificador].astype(str)
     )
@@ -689,6 +696,75 @@ def conciliar_bases(
         return "Status intermediário"
 
     conciliacao["Classificação"] = conciliacao.apply(classificar, axis=1)
+
+    def explicar_classificacao(linha) -> str:
+        classificacao = linha.get("Classificação", "")
+        origem = linha.get("_merge", "")
+        status_planejado = texto_limpo(
+            linha.get("Status_planejado", "")
+        )
+        status_resultado = texto_limpo(
+            linha.get("Status_resultado", "")
+        )
+
+        if classificacao == "Executada planejada":
+            return (
+                "OS de manutenção presente no planejado e com status "
+                f"executado no resultado: {status_resultado}"
+            )
+        if classificacao == "Execução extra":
+            return (
+                "OS de manutenção não encontrada no planejado e com "
+                f"status executado no resultado: {status_resultado}"
+            )
+        if classificacao == "Improdutiva":
+            return (
+                "OS de manutenção presente no planejado e com status "
+                f"improdutivo/não concluído no resultado: {status_resultado}"
+            )
+        if classificacao == "Improdutiva extra":
+            return (
+                "OS de manutenção não encontrada no planejado e com "
+                f"status improdutivo no resultado: {status_resultado}"
+            )
+        if classificacao == "Cancelada":
+            return (
+                "OS estava válida no planejado e apareceu cancelada "
+                f"posteriormente no resultado: {status_resultado}"
+            )
+        if classificacao == "Cancelada no planejamento":
+            return (
+                "OS já estava cancelada no arquivo planejado e foi "
+                f"retirada dos indicadores: {status_planejado}"
+            )
+        if classificacao == "Cancelada extra":
+            return (
+                "OS cancelada apareceu somente no resultado e não entra "
+                "como cancelamento de uma OS planejada."
+            )
+        if classificacao == "No-show":
+            return (
+                "OS de manutenção estava válida no planejado, mas não "
+                "foi encontrada no arquivo de resultado."
+            )
+        if classificacao == "Status intermediário":
+            return (
+                "OS encontrada nas duas bases, mas o status do resultado "
+                f"não foi reconhecido como executado, improdutivo ou cancelado: "
+                f"{status_resultado}"
+            )
+        if origem == "right_only":
+            return (
+                "OS apareceu somente no resultado, mas o status não foi "
+                f"reconhecido: {status_resultado}"
+            )
+
+        return "Classificação gerada pelas regras de conciliação."
+
+    conciliacao["Motivo da Classificação"] = conciliacao.apply(
+        explicar_classificacao,
+        axis=1,
+    )
 
     conciliacao["Troca de OS"] = conciliacao.apply(
         lambda linha: (
@@ -1235,6 +1311,7 @@ def exibir_detalhamento(
         "Troca de OS",
         "Status_planejado",
         "Status_resultado",
+        "Motivo da Classificação",
         "Qtd_planejada",
         "Qtd_resultado",
     ]
@@ -1332,7 +1409,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 1.7 — Cancelamentos válidos após o planejamento"
+        "Versão 1.8 — Contagem por OS e auditoria da classificação"
     )
 
 
