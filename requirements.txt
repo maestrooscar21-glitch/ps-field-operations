@@ -3,4 +3,4 @@ pandas
 plotly
 openpyxl
 odfpy
-supabase
+supabase==2.31.0
