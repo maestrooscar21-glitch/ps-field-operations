@@ -4,6 +4,7 @@ import unicodedata
 from datetime import date, datetime
 from typing import Any
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
@@ -77,6 +78,9 @@ TABELA_POR_TIPO = {
     "planejado": "atividades_planejadas",
     "resultado": "atividades_resultado",
 }
+
+FUSO_BRASIL = ZoneInfo("America/Sao_Paulo")
+DATA_CORTE_NOVA_REGRA = "2026-08-08"
 
 
 # =========================================================
@@ -611,7 +615,12 @@ def conciliar_bases(
     planejado: pd.DataFrame,
     resultado: pd.DataFrame,
 ) -> pd.DataFrame:
-    # O painel considera exclusivamente manutenções de qualquer tipo.
+    """
+    Regra híbrida:
+    - datas anteriores a DATA_CORTE_NOVA_REGRA usam a lógica histórica;
+    - a partir da data de corte, usa primeira aparição da OS para
+      classificar Agendada x Extra/Encaixe.
+    """
     planejado = filtrar_somente_manutencoes(planejado)
     resultado = filtrar_somente_manutencoes(resultado)
 
@@ -620,6 +629,18 @@ def conciliar_bases(
 
     if "Status da Atividade" not in resultado.columns:
         resultado["Status da Atividade"] = ""
+
+    if "Status da Atividade" not in planejado.columns:
+        planejado["Status da Atividade"] = ""
+
+    if "__Ativa no Planejamento" not in planejado.columns:
+        planejado["__Ativa no Planejamento"] = True
+
+    if "__Primeira Aparição Data" not in planejado.columns:
+        planejado["__Primeira Aparição Data"] = ""
+
+    if "__Data Operacional" not in planejado.columns:
+        planejado["__Data Operacional"] = ""
 
     resumo_resultado = (
         resultado
@@ -635,9 +656,6 @@ def conciliar_bases(
         .reset_index()
     )
 
-    if "Status da Atividade" not in planejado.columns:
-        planejado["Status da Atividade"] = ""
-
     resumo_planejado = (
         planejado
         .groupby("Chave Atendimento", dropna=False)
@@ -647,6 +665,18 @@ def conciliar_bases(
             OS_planejada=("OS", juntar_unicos),
             Oficina_planejada=("Oficina", "first"),
             Status_planejado=("Status da Atividade", juntar_unicos),
+            Primeira_aparicao_data=(
+                "__Primeira Aparição Data",
+                "first",
+            ),
+            Data_operacional_planejada=(
+                "__Data Operacional",
+                "first",
+            ),
+            Ativa_planejamento=(
+                "__Ativa no Planejamento",
+                "max",
+            ),
             Qtd_planejada=("Chave Atendimento", "size"),
         )
         .reset_index()
@@ -659,110 +689,249 @@ def conciliar_bases(
         indicator=True,
     )
 
-    def classificar(linha) -> str:
-        origem = linha["_merge"]
-        status_resultado = linha.get("Status_resultado", "")
+    def data_referencia_linha(linha) -> str | None:
+        data_operacional = converter_data_operacional(
+            linha.get("Data_operacional_planejada", "")
+        )
+        return data_operacional
+
+    def usar_regra_nova(linha) -> bool:
+        data_operacional = data_referencia_linha(linha)
+
+        if not data_operacional:
+            return False
+
+        return data_operacional >= DATA_CORTE_NOVA_REGRA
+
+    def eh_agendada_nova(linha) -> bool:
+        if linha.get("_merge") == "right_only":
+            return False
+
+        if not bool(linha.get("Ativa_planejamento", False)):
+            return False
+
+        primeira = converter_data_operacional(
+            linha.get("Primeira_aparicao_data", "")
+        )
+        data_operacional = data_referencia_linha(linha)
+
+        if not primeira or not data_operacional:
+            return False
+
+        return primeira < data_operacional
+
+    def eh_agendada_historica(linha) -> bool:
+        # Na regra antiga, toda manutenção válida presente no planejado
+        # era considerada agendada, independentemente de primeira aparição.
+        if linha.get("_merge") == "right_only":
+            return False
+
         status_planejado = linha.get("Status_planejado", "")
 
-        # Se a manutenção já estava cancelada no arquivo planejado,
-        # ela não entra como cancelamento do dia, no-show ou planejada válida.
+        if status_cancelado(status_planejado):
+            return False
+
+        return True
+
+    def eh_agendada(linha) -> bool:
+        if usar_regra_nova(linha):
+            return eh_agendada_nova(linha)
+
+        return eh_agendada_historica(linha)
+
+    conciliacao["Origem Agendamento"] = conciliacao.apply(
+        lambda linha: (
+            "Agendada"
+            if eh_agendada(linha)
+            else "Extra / encaixe"
+        ),
+        axis=1,
+    )
+
+    def classificar(linha) -> str:
+        origem_merge = linha["_merge"]
+        status_resultado = linha.get("Status_resultado", "")
+        status_planejado = linha.get("Status_planejado", "")
+        agendada = linha["Origem Agendamento"] == "Agendada"
+        ativa = bool(linha.get("Ativa_planejamento", False))
+        nova_regra = usar_regra_nova(linha)
+
+        # Histórico antigo preserva a lógica anterior.
+        if not nova_regra:
+            if origem_merge == "left_only":
+                if status_cancelado(status_planejado):
+                    return "Cancelada no agendamento"
+                return "No-show"
+
+            if origem_merge == "right_only":
+                if status_improdutivo(status_resultado):
+                    return "Improdutiva extra"
+                if status_cancelado(status_resultado):
+                    return "Cancelada extra"
+                if status_executado(status_resultado):
+                    return "Executada extra"
+                return "Evento extra"
+
+            if status_cancelado(status_planejado):
+                return "Cancelada no agendamento"
+
+            if status_improdutivo(status_resultado):
+                return "Improdutiva agendada"
+
+            if status_cancelado(status_resultado):
+                return "Cancelada"
+
+            if status_executado(status_resultado):
+                return "Executada agendada"
+
+            return "Status intermediário agendado"
+
+        # Nova regra, a partir da data de corte.
+        if origem_merge == "left_only" and not ativa:
+            return "Retirada do agendamento"
+
         if (
-            origem in {"left_only", "both"}
+            origem_merge in {"left_only", "both"}
+            and ativa
             and status_cancelado(status_planejado)
         ):
-            return "Cancelada no planejamento"
+            return "Cancelada no agendamento"
 
-        if origem == "left_only":
-            return "No-show"
+        if origem_merge == "left_only":
+            if agendada:
+                return "No-show"
+            return "Encaixe não realizado"
 
-        if origem == "right_only":
+        if origem_merge == "right_only":
             if status_improdutivo(status_resultado):
                 return "Improdutiva extra"
             if status_cancelado(status_resultado):
                 return "Cancelada extra"
             if status_executado(status_resultado):
-                return "Execução extra"
+                return "Executada extra"
             return "Evento extra"
 
-        # Só conta como cancelada quando estava válida no planejado
-        # e apareceu cancelada posteriormente no relatório de resultado.
         if status_improdutivo(status_resultado):
-            return "Improdutiva"
+            return (
+                "Improdutiva agendada"
+                if agendada
+                else "Improdutiva extra"
+            )
+
         if status_cancelado(status_resultado):
-            return "Cancelada"
+            return (
+                "Cancelada"
+                if agendada
+                else "Cancelada extra"
+            )
+
         if status_executado(status_resultado):
-            return "Executada planejada"
+            return (
+                "Executada agendada"
+                if agendada
+                else "Executada extra"
+            )
 
-        return "Status intermediário"
+        return (
+            "Status intermediário agendado"
+            if agendada
+            else "Status intermediário extra"
+        )
 
-    conciliacao["Classificação"] = conciliacao.apply(classificar, axis=1)
+    conciliacao["Classificação"] = conciliacao.apply(
+        classificar,
+        axis=1,
+    )
 
     def explicar_classificacao(linha) -> str:
         classificacao = linha.get("Classificação", "")
-        origem = linha.get("_merge", "")
         status_planejado = texto_limpo(
             linha.get("Status_planejado", "")
         )
         status_resultado = texto_limpo(
             linha.get("Status_resultado", "")
         )
+        primeira = texto_limpo(
+            linha.get("Primeira_aparicao_data", "")
+        )
+        data_operacional = texto_limpo(
+            linha.get("Data_operacional_planejada", "")
+        )
+        nova_regra = usar_regra_nova(linha)
 
-        if classificacao == "Executada planejada":
+        if not nova_regra:
             return (
-                "OS de manutenção presente no planejado e com status "
-                f"executado no resultado: {status_resultado}"
+                "Histórico anterior à data de corte: classificação "
+                "preservada pela lógica antiga do painel."
             )
-        if classificacao == "Execução extra":
+
+        if classificacao == "Executada agendada":
             return (
-                "OS de manutenção não encontrada no planejado e com "
-                f"status executado no resultado: {status_resultado}"
+                f"Manutenção já estava agendada antes de {data_operacional} "
+                f"(primeira aparição: {primeira}) e foi executada."
             )
-        if classificacao == "Improdutiva":
+        if classificacao == "Executada extra":
             return (
-                "OS de manutenção presente no planejado e com status "
-                f"improdutivo/não concluído no resultado: {status_resultado}"
+                "Manutenção não tinha prova de agendamento para essa data "
+                "antes do início do dia e foi executada como extra/encaixe."
+            )
+        if classificacao == "Improdutiva agendada":
+            return (
+                "Manutenção já estava agendada antes do dia e terminou "
+                f"improdutiva/não concluída: {status_resultado}"
             )
         if classificacao == "Improdutiva extra":
             return (
-                "OS de manutenção não encontrada no planejado e com "
-                f"status improdutivo no resultado: {status_resultado}"
+                "Manutenção extra/encaixe terminou improdutiva/não concluída: "
+                f"{status_resultado}"
             )
         if classificacao == "Cancelada":
             return (
-                "OS estava válida no planejado e apareceu cancelada "
+                "Manutenção estava agendada válida e apareceu cancelada "
                 f"posteriormente no resultado: {status_resultado}"
-            )
-        if classificacao == "Cancelada no planejamento":
-            return (
-                "OS já estava cancelada no arquivo planejado e foi "
-                f"retirada dos indicadores: {status_planejado}"
             )
         if classificacao == "Cancelada extra":
             return (
-                "OS cancelada apareceu somente no resultado e não entra "
-                "como cancelamento de uma OS planejada."
+                "Cancelamento de manutenção sem prova de agendamento "
+                "anterior para essa mesma data."
+            )
+        if classificacao == "Cancelada no agendamento":
+            return (
+                "A manutenção já estava cancelada na fotografia vigente "
+                f"do agendamento: {status_planejado}"
             )
         if classificacao == "No-show":
             return (
-                "OS de manutenção estava válida no planejado, mas não "
-                "foi encontrada no arquivo de resultado."
+                "Manutenção estava agendada antes do dia e não apareceu "
+                "no arquivo de resultado."
             )
-        if classificacao == "Status intermediário":
+        if classificacao == "Encaixe não realizado":
             return (
-                "OS encontrada nas duas bases, mas o status do resultado "
-                f"não foi reconhecido como executado, improdutivo ou cancelado: "
-                f"{status_resultado}"
+                "A manutenção surgiu no próprio dia como extra/encaixe "
+                "e não apareceu no resultado; não conta como no-show."
             )
-        if origem == "right_only":
+        if classificacao == "Retirada do agendamento":
             return (
-                "OS apareceu somente no resultado, mas o status não foi "
-                f"reconhecido: {status_resultado}"
+                "A OS apareceu em fotografia anterior, mas não está mais "
+                "no agendamento vigente dessa data."
             )
 
-        return "Classificação gerada pelas regras de conciliação."
+        return (
+            "Status não reconhecido pelas regras principais. "
+            f"Planejado: {status_planejado}; resultado: {status_resultado}."
+        )
 
     conciliacao["Motivo da Classificação"] = conciliacao.apply(
         explicar_classificacao,
+        axis=1,
+    )
+
+    conciliacao["Regra Aplicada"] = conciliacao.apply(
+        lambda linha: (
+            "Nova regra"
+            if usar_regra_nova(linha)
+            else "Regra histórica"
+        ),
         axis=1,
     )
 
@@ -771,8 +940,12 @@ def conciliar_bases(
             "Sim"
             if (
                 linha["_merge"] == "both"
-                and texto_limpo(linha.get("OS_planejada", ""))
-                != texto_limpo(linha.get("OS_resultado", ""))
+                and texto_limpo(
+                    linha.get("OS_planejada", "")
+                )
+                != texto_limpo(
+                    linha.get("OS_resultado", "")
+                )
             )
             else "Não"
         ),
@@ -795,58 +968,86 @@ def conciliar_bases(
 
 
 def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
-    planejadas = int(
-        conciliacao[
-            (conciliacao["_merge"] != "right_only")
-            & (
-                conciliacao["Classificação"]
-                != "Cancelada no planejamento"
-            )
-        ].shape[0]
+    agendadas_validas = {
+        "Executada agendada",
+        "Improdutiva agendada",
+        "Cancelada",
+        "No-show",
+        "Status intermediário agendado",
+    }
+
+    manutencoes_agendadas = int(
+        conciliacao["Classificação"].isin(
+            agendadas_validas
+        ).sum()
     )
-    executadas_planejadas = int(
-        (conciliacao["Classificação"] == "Executada planejada").sum()
+
+    agendadas_executadas = int(
+        (
+            conciliacao["Classificação"]
+            == "Executada agendada"
+        ).sum()
     )
-    improdutivas_planejadas = int(
-        (conciliacao["Classificação"] == "Improdutiva").sum()
+
+    executadas_extras = int(
+        (
+            conciliacao["Classificação"]
+            == "Executada extra"
+        ).sum()
     )
+
+    improdutivas_agendadas = int(
+        (
+            conciliacao["Classificação"]
+            == "Improdutiva agendada"
+        ).sum()
+    )
+
     improdutivas_extras = int(
-        (conciliacao["Classificação"] == "Improdutiva extra").sum()
+        (
+            conciliacao["Classificação"]
+            == "Improdutiva extra"
+        ).sum()
     )
-    improdutivas = improdutivas_planejadas + improdutivas_extras
+
+    improdutivas = (
+        improdutivas_agendadas
+        + improdutivas_extras
+    )
 
     canceladas = int(
         (conciliacao["Classificação"] == "Cancelada").sum()
     )
+
     no_show = int(
         (conciliacao["Classificação"] == "No-show").sum()
     )
-    executadas_extras = int(
-        (conciliacao["Classificação"] == "Execução extra").sum()
-    )
 
-    # MCI continua medindo aderência ao agendamento:
-    # executadas agendadas ÷ manutenções agendadas.
     mci = (
-        executadas_planejadas / planejadas * 100
-        if planejadas
+        agendadas_executadas
+        / manutencoes_agendadas
+        * 100
+        if manutencoes_agendadas
         else 0.0
     )
 
-    # MD passa a medir toda a improdutividade ocorrida no campo,
-    # incluindo improdutivas extras.
     base_md = (
-        executadas_planejadas
+        agendadas_executadas
         + executadas_extras
         + improdutivas
     )
-    md = improdutivas / base_md * 100 if base_md else 0.0
+
+    md = (
+        improdutivas / base_md * 100
+        if base_md
+        else 0.0
+    )
 
     return {
-        "Planejadas": planejadas,
-        "Executadas planejadas": executadas_planejadas,
+        "Planejadas": manutencoes_agendadas,
+        "Executadas planejadas": agendadas_executadas,
         "Improdutivas": improdutivas,
-        "Improdutivas agendadas": improdutivas_planejadas,
+        "Improdutivas agendadas": improdutivas_agendadas,
         "Improdutivas extras": improdutivas_extras,
         "Canceladas": canceladas,
         "No-show": no_show,
@@ -854,16 +1055,23 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         "MCI": mci,
         "MD": md,
         "Índice no-show": (
-            no_show / planejadas * 100 if planejadas else 0.0
+            no_show / manutencoes_agendadas * 100
+            if manutencoes_agendadas
+            else 0.0
         ),
         "Índice cancelamento": (
-            canceladas / planejadas * 100 if planejadas else 0.0
+            canceladas / manutencoes_agendadas * 100
+            if manutencoes_agendadas
+            else 0.0
         ),
         "Execução total": (
-            (executadas_planejadas + executadas_extras)
-            / planejadas
+            (
+                agendadas_executadas
+                + executadas_extras
+            )
+            / manutencoes_agendadas
             * 100
-            if planejadas
+            if manutencoes_agendadas
             else 0.0
         ),
     }
@@ -918,6 +1126,11 @@ def registro_atividade(
     linha: pd.Series,
     data_operacional: str,
     incluir_status: bool,
+    primeira_aparicao: str | None = None,
+    primeira_aparicao_data: str | None = None,
+    ultima_aparicao: str | None = None,
+    ativa_no_planejamento: bool | None = None,
+    nome_arquivo_primeira_aparicao: str | None = None,
 ) -> dict:
     dados = {
         str(coluna): texto_limpo(valor)
@@ -947,11 +1160,26 @@ def registro_atividade(
         "dados": dados,
     }
 
-    # A tabela de resultado possui status_atividade.
-    # A tabela de planejado pode não possuir essa coluna.
     if incluir_status:
         registro["status_atividade"] = texto_limpo(
             linha.get("Status da Atividade", "")
+        )
+
+    if primeira_aparicao is not None:
+        registro["primeira_aparicao"] = primeira_aparicao
+
+    if primeira_aparicao_data is not None:
+        registro["primeira_aparicao_data"] = primeira_aparicao_data
+
+    if ultima_aparicao is not None:
+        registro["ultima_aparicao"] = ultima_aparicao
+
+    if ativa_no_planejamento is not None:
+        registro["ativa_no_planejamento"] = ativa_no_planejamento
+
+    if nome_arquivo_primeira_aparicao is not None:
+        registro["nome_arquivo_primeira_aparicao"] = (
+            nome_arquivo_primeira_aparicao
         )
 
     return registro
@@ -964,8 +1192,6 @@ def preparar_atividades_para_banco(
 ) -> list[dict]:
     base = criar_chaves(df)
 
-    # A tabela possui chave única por data e atendimento.
-    # Mantemos uma linha lógica por atendimento.
     base = base.drop_duplicates(
         subset=["Chave Atendimento"],
         keep="last",
@@ -981,23 +1207,200 @@ def preparar_atividades_para_banco(
     ]
 
 
+def converter_data_operacional(valor) -> str | None:
+    texto = texto_limpo(valor)
+
+    if not texto:
+        return None
+
+    for dayfirst in (True, False):
+        try:
+            data_convertida = pd.to_datetime(
+                texto,
+                dayfirst=dayfirst,
+                errors="raise",
+            )
+            return data_convertida.date().isoformat()
+        except Exception:
+            pass
+
+    return None
+
+
+def separar_planejamento_por_data(
+    df: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    """
+    Recebe o CSV de janela móvel do OFS e separa automaticamente
+    as manutenções pela coluna Data.
+    """
+    base = filtrar_somente_manutencoes(df)
+
+    if "Data" not in base.columns:
+        raise ValueError(
+            "A base não possui a coluna 'Data'. "
+            "Não é possível separar a janela por dia."
+        )
+
+    base = base.copy()
+    base["__Data Operacional"] = base["Data"].apply(
+        converter_data_operacional
+    )
+
+    invalidas = base["__Data Operacional"].isna().sum()
+
+    if invalidas:
+        raise ValueError(
+            f"{invalidas} linha(s) de manutenção possuem Data inválida."
+        )
+
+    return {
+        str(data_operacional): grupo.drop(
+            columns=["__Data Operacional"]
+        ).reset_index(drop=True)
+        for data_operacional, grupo in base.groupby(
+            "__Data Operacional"
+        )
+    }
+
+
+def salvar_planejamento_janela(
+    nome_arquivo: str,
+    df: pd.DataFrame,
+) -> dict[str, int]:
+    """
+    Salva uma fotografia de 1, 3 ou mais dias do planejamento.
+
+    A OS é identificada por OS (+ placa quando disponível).
+    Para cada OS/data, preserva a primeira vez em que ela apareceu.
+    Registros que existiam em uma fotografia anterior daquela data,
+    mas desapareceram na fotografia atual, ficam inativos em vez de
+    serem apagados. Isso preserva o histórico sem tratá-los como
+    agendamento vigente.
+    """
+    cliente = exigir_supabase()
+    grupos = separar_planejamento_por_data(df)
+    agora = datetime.now(FUSO_BRASIL)
+    agora_iso = agora.isoformat()
+    hoje_iso = agora.date().isoformat()
+    resumo: dict[str, int] = {}
+
+    for data_operacional, grupo in grupos.items():
+        base = criar_chaves(grupo).drop_duplicates(
+            subset=["Chave Atendimento"],
+            keep="last",
+        )
+
+        existentes = buscar_todos(
+            "atividades_planejadas",
+            filtros={"data_operacional": data_operacional},
+        )
+
+        mapa_existentes = {
+            texto_limpo(registro.get("chave_atendimento", "")): registro
+            for registro in existentes
+        }
+
+        # Tudo que não reaparecer nesta fotografia deixa de ser
+        # agendamento vigente, mas continua salvo para auditoria.
+        if existentes:
+            cliente.table("atividades_planejadas").update(
+                {
+                    "ativa_no_planejamento": False,
+                    "ultima_aparicao": agora_iso,
+                }
+            ).eq(
+                "data_operacional",
+                data_operacional,
+            ).execute()
+
+        registros = []
+
+        for _, linha in base.iterrows():
+            chave = texto_limpo(linha["Chave Atendimento"])
+            anterior = mapa_existentes.get(chave)
+
+            primeira_aparicao = (
+                anterior.get("primeira_aparicao")
+                if anterior
+                else agora_iso
+            )
+            primeira_aparicao_data = (
+                anterior.get("primeira_aparicao_data")
+                if anterior
+                else hoje_iso
+            )
+            arquivo_primeira = (
+                anterior.get("nome_arquivo_primeira_aparicao")
+                if anterior
+                else nome_arquivo
+            )
+
+            registro = registro_atividade(
+                linha,
+                data_operacional,
+                incluir_status=True,
+                primeira_aparicao=primeira_aparicao,
+                primeira_aparicao_data=primeira_aparicao_data,
+                ultima_aparicao=agora_iso,
+                ativa_no_planejamento=True,
+                nome_arquivo_primeira_aparicao=arquivo_primeira,
+            )
+            registros.append(registro)
+
+        for inicio in range(0, len(registros), 300):
+            cliente.table("atividades_planejadas").upsert(
+                registros[inicio : inicio + 300],
+                on_conflict="data_operacional,chave_atendimento",
+            ).execute()
+
+        cliente.table("bases_importadas").delete().eq(
+            "tipo",
+            "planejado",
+        ).eq(
+            "data_operacional",
+            data_operacional,
+        ).execute()
+
+        cliente.table("bases_importadas").insert(
+            {
+                "tipo": "planejado",
+                "data_operacional": data_operacional,
+                "nome_arquivo": nome_arquivo,
+                "quantidade_registros": len(registros),
+                "atualizado_em": agora_iso,
+            }
+        ).execute()
+
+        resumo[data_operacional] = len(registros)
+
+    return resumo
+
+
 def salvar_base(
     tipo: str,
     data_operacional: date,
     nome_arquivo: str,
     df: pd.DataFrame,
 ) -> None:
+    """
+    Mantido para Resultado. Planejamento usa salvar_planejamento_janela().
+    """
+    if tipo == "planejado":
+        salvar_planejamento_janela(nome_arquivo, df)
+        return
+
     cliente = exigir_supabase()
     data_texto = data_operacional.isoformat()
     tabela = TABELA_POR_TIPO[tipo]
 
+    base = filtrar_somente_manutencoes(df)
     registros = preparar_atividades_para_banco(
-        df,
+        base,
         data_texto,
-        incluir_status=(tipo == "resultado"),
+        incluir_status=True,
     )
 
-    # Substituição segura da base da mesma data.
     cliente.table(tabela).delete().eq(
         "data_operacional",
         data_texto,
@@ -1019,7 +1422,7 @@ def salvar_base(
             "data_operacional": data_texto,
             "nome_arquivo": nome_arquivo,
             "quantidade_registros": len(registros),
-            "atualizado_em": datetime.now().isoformat(),
+            "atualizado_em": datetime.now(FUSO_BRASIL).isoformat(),
         }
     ).execute()
 
@@ -1087,7 +1490,10 @@ def carregar_oficinas() -> pd.DataFrame:
     )
 
 
-def carregar_base(tipo: str, data_operacional: str) -> pd.DataFrame:
+def carregar_base(
+    tipo: str,
+    data_operacional: str,
+) -> pd.DataFrame:
     tabela = TABELA_POR_TIPO[tipo]
     registros = buscar_todos(
         tabela,
@@ -1109,9 +1515,44 @@ def carregar_base(tipo: str, data_operacional: str) -> pd.DataFrame:
             "Estado": registro.get("estado", ""),
             "Cidade": registro.get("cidade", ""),
             "Tipo de Atividade": registro.get("tipo_atividade", ""),
-            "Status da Atividade": registro.get("status_atividade", ""),
+            "Status da Atividade": registro.get(
+                "status_atividade",
+                "",
+            ),
             "Recurso": registro.get("recurso", ""),
+            "__Data Operacional": registro.get(
+                "data_operacional",
+                data_operacional,
+            ),
         }
+
+        if tipo == "planejado":
+            padrao.update(
+                {
+                    "__Primeira Aparição": registro.get(
+                        "primeira_aparicao",
+                        "",
+                    ),
+                    "__Primeira Aparição Data": registro.get(
+                        "primeira_aparicao_data",
+                        "",
+                    ),
+                    "__Última Aparição": registro.get(
+                        "ultima_aparicao",
+                        "",
+                    ),
+                    "__Ativa no Planejamento": bool(
+                        registro.get(
+                            "ativa_no_planejamento",
+                            True,
+                        )
+                    ),
+                    "__Arquivo Primeira Aparição": registro.get(
+                        "nome_arquivo_primeira_aparicao",
+                        "",
+                    ),
+                }
+            )
 
         dados.update(padrao)
         linhas.append(dados)
@@ -1225,7 +1666,7 @@ def exibir_cards_indicadores(
         (
             "Agendadas executadas",
             "Executadas planejadas",
-            "Executada planejada",
+            "Executada agendada",
         ),
         (
             "Improdutivas",
@@ -1245,7 +1686,7 @@ def exibir_cards_indicadores(
         (
             "Executadas extras",
             "Executadas extras",
-            "Execução extra",
+            "Executada extra",
         ),
     ]
 
@@ -1298,18 +1739,24 @@ def filtrar_detalhes(
     filtro: str,
 ) -> pd.DataFrame:
     if filtro in {"Planejadas", "Manutenções agendadas"}:
+        classes = [
+            "Executada agendada",
+            "Improdutiva agendada",
+            "Cancelada",
+            "No-show",
+            "Status intermediário agendado",
+        ]
         return conciliacao[
-            (conciliacao["_merge"] != "right_only")
-            & (
-                conciliacao["Classificação"]
-                != "Cancelada no planejamento"
-            )
+            conciliacao["Classificação"].isin(classes)
         ].copy()
 
     if filtro == "Improdutivas":
         return conciliacao[
             conciliacao["Classificação"].isin(
-                ["Improdutiva", "Improdutiva extra"]
+                [
+                    "Improdutiva agendada",
+                    "Improdutiva extra",
+                ]
             )
         ].copy()
 
@@ -1359,6 +1806,10 @@ def exibir_detalhamento(
         "OS_planejada",
         "OS_resultado",
         "Troca de OS",
+        "Regra Aplicada",
+        "Origem Agendamento",
+        "Primeira_aparicao_data",
+        "Data_operacional_planejada",
         "Status_planejado",
         "Status_resultado",
         "Motivo da Classificação",
@@ -1459,7 +1910,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 1.9 — Improdutivas totais e nomenclatura de manutenções"
+        "Versão 2.1 — Histórico preservado + nova regra a partir de 08/08/2026"
     )
 
 
@@ -1513,13 +1964,15 @@ if pagina == "📥 Importações":
                 st.error(f"Erro no cadastro: {erro}")
 
     with aba_planejado:
-        data_planejado = st.date_input(
-            "Data operacional do planejado",
-            value=date.today(),
-            key="data_planejado",
+        st.markdown("### Janela móvel de agendamentos")
+        st.caption(
+            "Baixe no OFS a janela de 3 dias (ou outra janela desejada). "
+            "O sistema separa automaticamente as manutenções pela coluna Data "
+            "e preserva a primeira aparição de cada OS para cada data."
         )
+
         arquivo = st.file_uploader(
-            "Arquivo CSV do planejado",
+            "Arquivo CSV do agendamento",
             type=["csv"],
             key="planejado_upload",
         )
@@ -1527,22 +1980,66 @@ if pagina == "📥 Importações":
         if arquivo is not None:
             try:
                 df = ler_csv_ofs(arquivo)
-                st.write(f"Registros lidos: **{len(df)}**")
+                grupos_preview = separar_planejamento_por_data(df)
+
+                st.write(
+                    f"Manutenções identificadas no arquivo: "
+                    f"**{sum(len(g) for g in grupos_preview.values())}**"
+                )
+
+                resumo_preview = pd.DataFrame(
+                    [
+                        {
+                            "Data": pd.to_datetime(data).strftime(
+                                "%d/%m/%Y"
+                            ),
+                            "Manutenções": len(grupo),
+                        }
+                        for data, grupo in sorted(
+                            grupos_preview.items()
+                        )
+                    ]
+                )
+
+                st.dataframe(
+                    resumo_preview,
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
                 if st.button(
-                    "💾 Salvar planejado no Supabase",
+                    "💾 Salvar janela de agendamentos no Supabase",
                     type="primary",
                 ):
-                    salvar_base(
-                        "planejado",
-                        data_planejado,
+                    resumo_salvo = salvar_planejamento_janela(
                         arquivo.name,
                         df,
                     )
-                    st.success("Planejado salvo permanentemente.")
+
+                    st.success(
+                        "Janela salva. Primeira aparição das OS preservada."
+                    )
+
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "Data": pd.to_datetime(data).strftime(
+                                        "%d/%m/%Y"
+                                    ),
+                                    "Manutenções salvas": quantidade,
+                                }
+                                for data, quantidade in sorted(
+                                    resumo_salvo.items()
+                                )
+                            ]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
             except Exception as erro:
-                st.error(f"Erro no planejado: {erro}")
+                st.error(f"Erro no agendamento: {erro}")
 
     with aba_resultado:
         data_resultado = st.date_input(
@@ -2048,11 +2545,11 @@ elif pagina == "👤 Painel do Consultor":
                 lambda serie: int(
                     serie.isin(
                         [
-                            "Executada planejada",
-                            "Improdutiva",
+                            "Executada agendada",
+                            "Improdutiva agendada",
                             "Cancelada",
                             "No-show",
-                            "Status intermediário",
+                            "Status intermediário agendado",
                         ]
                     ).sum()
                 ),
@@ -2060,14 +2557,14 @@ elif pagina == "👤 Painel do Consultor":
             Executadas=(
                 "Classificação",
                 lambda serie: int(
-                    (serie == "Executada planejada").sum()
+                    (serie == "Executada agendada").sum()
                 ),
             ),
             Improdutivas=(
                 "Classificação",
                 lambda serie: int(
                     serie.isin(
-                        ["Improdutiva", "Improdutiva extra"]
+                        ["Improdutiva agendada", "Improdutiva extra"]
                     ).sum()
                 ),
             ),
@@ -2086,7 +2583,7 @@ elif pagina == "👤 Painel do Consultor":
             Extras=(
                 "Classificação",
                 lambda serie: int(
-                    (serie == "Execução extra").sum()
+                    (serie == "Executada extra").sum()
                 ),
             ),
         )
