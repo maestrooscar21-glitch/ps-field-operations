@@ -1910,7 +1910,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.1 — Histórico preservado + nova regra a partir de 08/08/2026"
+        "Versão 2.1.1 — Correção do Follow com uma única oficina"
     )
 
 
@@ -2819,12 +2819,18 @@ elif pagina == "📞 Follow":
         st.info("Não há oficinas para o consultor selecionado.")
         st.stop()
 
-    quantidade = st.slider(
-        "Quantidade de oficinas",
-        min_value=1,
-        max_value=len(ranking),
-        value=min(3, len(ranking)),
-    )
+    # O Streamlit não aceita slider com mínimo e máximo iguais.
+    # Se houver apenas uma oficina no ranking, usamos 1 diretamente.
+    if len(ranking) == 1:
+        quantidade = 1
+        st.caption("1 oficina disponível para o consultor selecionado.")
+    else:
+        quantidade = st.slider(
+            "Quantidade de oficinas",
+            min_value=1,
+            max_value=len(ranking),
+            value=min(3, len(ranking)),
+        )
 
     for _, linha in ranking.head(quantidade).iterrows():
         with st.container(border=True):
