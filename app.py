@@ -2053,9 +2053,9 @@ def botao_whatsapp_web(
     identificador: str,
 ) -> None:
     """
-    Abre exclusivamente o WhatsApp Web no navegador.
-    Não chama whatsapp:// nem tenta iniciar WhatsApp.exe.
-    Isso evita bloqueios do antivírus corporativo/Cortex XDR.
+    Abre exclusivamente o WhatsApp Web.
+    Usa o componente nativo do Streamlit para evitar exibição de HTML bruto.
+    Não chama whatsapp:// nem WhatsApp.exe.
     """
     numero = limpar_telefone(telefone)
 
@@ -2069,30 +2069,10 @@ def botao_whatsapp_web(
         f"?phone={numero}&text={texto_url}"
     )
 
-    link_web_seguro = html.escape(
+    st.link_button(
+        "📱 Abrir no WhatsApp Web",
         link_web,
-        quote=True,
-    )
-
-    st.markdown(
-        f"""
-        <a
-          href="{link_web_seguro}"
-          target="_blank"
-          rel="noopener noreferrer"
-          style="
-            display:inline-block;
-            width:100%;
-            text-align:center;
-            padding:0.62rem 0.85rem;
-            border-radius:0.5rem;
-            text-decoration:none;
-            font-weight:600;
-            border:1px solid rgba(49,51,63,.25);
-          "
-        >📱 Abrir no WhatsApp Web</a>
-        """,
-        unsafe_allow_html=True,
+        use_container_width=True,
     )
 
 
@@ -2433,7 +2413,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.2.1 — Follow com WhatsApp Web, formulário e métricas"
+        "Versão 2.2.2 — Correção visual do botão WhatsApp Web"
     )
 
 
