@@ -2354,24 +2354,236 @@ def exibir_respostas_follow(
     if respondidos.empty:
         return
 
-    st.markdown("#### Respostas recebidas")
+    st.markdown("### Respostas recebidas")
+    st.caption(
+        "Detalhamento das confirmações e dos impedimentos "
+        "informados pelas oficinas."
+    )
 
-    colunas = [
-        "oficina",
-        "qtd_agendadas",
-        "status_resposta",
+    cliente = exigir_supabase()
+
+    for _, contato in respondidos.sort_values(
         "respondido_em",
-    ]
-    colunas = [
-        coluna
-        for coluna in colunas
-        if coluna in respondidos.columns
-    ]
+        ascending=False,
+    ).iterrows():
+        follow_id = int(contato["id"])
 
-    st.dataframe(
-        respondidos[colunas],
-        use_container_width=True,
-        hide_index=True,
+        resposta_db = (
+            cliente.table("follow_respostas")
+            .select("*")
+            .eq("follow_id", follow_id)
+            .order("respondido_em", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        resposta = (
+            resposta_db.data[0]
+            if resposta_db.data
+            else {}
+        )
+
+        tem_impedimento = bool(
+            contato.get("tem_impedimento")
+        )
+
+        oficina = texto_limpo(
+            contato.get("oficina")
+        )
+        qtd = int(
+            contato.get("qtd_agendadas") or 0
+        )
+
+        status_visual = (
+            "⚠️ COM IMPEDIMENTO"
+            if tem_impedimento
+            else "✅ SEM IMPEDIMENTO"
+        )
+
+        # Supabase grava timestamptz em UTC; convertemos para Brasília.
+        respondido_em = contato.get("respondido_em")
+        data_hora = "Não informado"
+
+        if respondido_em:
+            try:
+                dt = pd.to_datetime(
+                    respondido_em,
+                    utc=True,
+                ).tz_convert(FUSO_BRASIL)
+                data_hora = dt.strftime(
+                    "%d/%m/%Y às %H:%M"
+                )
+            except Exception:
+                data_hora = texto_limpo(
+                    respondido_em
+                )
+
+        with st.container(border=True):
+            st.markdown(
+                f"#### {oficina} — {status_visual}"
+            )
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric(
+                "Manutenções no Follow",
+                qtd,
+            )
+            c2.metric(
+                "Situação",
+                (
+                    "Com impedimento"
+                    if tem_impedimento
+                    else "Sem impedimento"
+                ),
+            )
+            c3.metric(
+                "Respondido",
+                data_hora,
+            )
+
+            nome = texto_limpo(
+                resposta.get("nome_respondente")
+            )
+            if nome:
+                st.caption(
+                    f"Respondente: **{nome}**"
+                )
+
+            equipamentos_ok = resposta.get(
+                "equipamentos_ok"
+            )
+            veiculo = texto_limpo(
+                resposta.get("veiculo_disponivel")
+            )
+            capacidade_ok = resposta.get(
+                "capacidade_ok"
+            )
+
+            d1, d2, d3 = st.columns(3)
+
+            if equipamentos_ok is True:
+                d1.success("🧰 Equipamentos: OK")
+            elif equipamentos_ok is False:
+                d1.error(
+                    "🧰 Equipamentos: NÃO"
+                )
+            else:
+                d1.info(
+                    "🧰 Equipamentos: não informado"
+                )
+
+            if veiculo == "Sim":
+                d2.success(
+                    "🚚 Veículo disponível: SIM"
+                )
+            elif veiculo == "Não":
+                d2.error(
+                    "🚚 Veículo disponível: NÃO"
+                )
+            else:
+                d2.warning(
+                    f"🚚 Veículo disponível: "
+                    f"{veiculo or 'não informado'}"
+                )
+
+            if capacidade_ok is True:
+                d3.success(
+                    "👷 Capacidade técnica: OK"
+                )
+            elif capacidade_ok is False:
+                d3.error(
+                    "👷 Capacidade técnica: NÃO"
+                )
+            else:
+                d3.info(
+                    "👷 Capacidade técnica: não informada"
+                )
+
+            motivos = resposta.get(
+                "motivos"
+            ) or []
+            os_afetadas = resposta.get(
+                "os_afetadas"
+            ) or []
+            observacao = texto_limpo(
+                resposta.get("observacao")
+            )
+            previsao = texto_limpo(
+                resposta.get("previsao_solucao")
+            )
+
+            if tem_impedimento:
+                st.markdown("**Impedimento informado**")
+
+                if motivos:
+                    st.write(
+                        " • ".join(
+                            str(motivo)
+                            for motivo in motivos
+                        )
+                    )
+                else:
+                    st.write(
+                        "Motivo não detalhado."
+                    )
+
+                if os_afetadas:
+                    st.markdown(
+                        "**OS possivelmente afetadas:** "
+                        + ", ".join(
+                            str(os_numero)
+                            for os_numero in os_afetadas
+                        )
+                    )
+
+                if observacao:
+                    st.markdown(
+                        f"**Observação:** {observacao}"
+                    )
+
+                if previsao:
+                    st.markdown(
+                        f"**Previsão de solução:** {previsao}"
+                    )
+            elif observacao:
+                st.markdown(
+                    f"**Observação:** {observacao}"
+                )
+
+    st.markdown("#### Resumo do acompanhamento")
+
+    total = len(contatos)
+    qtd_respondidos = len(respondidos)
+    com_impedimento = int(
+        (
+            respondidos["tem_impedimento"]
+            == True
+        ).sum()
+    )
+    sem_impedimento = int(
+        (
+            respondidos["tem_impedimento"]
+            == False
+        ).sum()
+    )
+    sem_resposta = max(
+        total - qtd_respondidos,
+        0,
+    )
+
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Respondidas", qtd_respondidos)
+    r2.metric(
+        "Sem impedimento",
+        sem_impedimento,
+    )
+    r3.metric(
+        "Com impedimento",
+        com_impedimento,
+    )
+    r4.metric(
+        "Sem resposta",
+        sem_resposta,
     )
 
 
@@ -2413,7 +2625,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.2.3 — Follow exclui manutenções canceladas"
+        "Versão 2.2.4 — Respostas detalhadas e horário de Brasília"
     )
 
 
