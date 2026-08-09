@@ -2413,7 +2413,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.2.2 — Correção visual do botão WhatsApp Web"
+        "Versão 2.2.3 — Follow exclui manutenções canceladas"
     )
 
 
@@ -3308,13 +3308,23 @@ elif pagina == "📞 Follow":
         st.warning("Cadastre as oficinas.")
         st.stop()
 
-    # Para follow usamos somente a fotografia vigente do planejamento.
+    # Mantemos somente a fotografia vigente do planejamento.
     if "__Ativa no Planejamento" in planejado.columns:
         planejado = planejado[
             planejado["__Ativa no Planejamento"] == True
         ].copy()
 
-    base = enriquecer_com_cadastro(
+    if planejado.empty:
+        st.info("Não há manutenções vigentes para esta data.")
+        st.stop()
+
+    # Classifica canceladas para excluir do follow acionável,
+    # sem apagar do histórico.
+    planejado["__Cancelada"] = planejado[
+        "Status da Atividade"
+    ].apply(status_cancelado)
+
+    base_todas = enriquecer_com_cadastro(
         planejado,
         cadastro,
     )
@@ -3322,7 +3332,7 @@ elif pagina == "📞 Follow":
     consultores = sorted(
         {
             texto_limpo(valor)
-            for valor in base["Consultor"]
+            for valor in base_todas["Consultor"]
             if texto_limpo(valor)
         }
     )
@@ -3338,19 +3348,24 @@ elif pagina == "📞 Follow":
         consultores,
     )
 
-    base_consultor = base[
-        base["Consultor"] == consultor
+    base_consultor_todas = base_todas[
+        base_todas["Consultor"] == consultor
     ].copy()
 
-    if base_consultor.empty:
+    if base_consultor_todas.empty:
         st.info(
-            "Não há manutenções agendadas para este consultor."
+            "Não há manutenções para este consultor."
         )
         st.stop()
 
-    # Lista as OS por oficina para enviar no formulário.
-    agrupado = (
-        base_consultor
+    # Follow acionável: somente manutenção vigente e não cancelada.
+    base_consultor = base_consultor_todas[
+        base_consultor_todas["__Cancelada"] == False
+    ].copy()
+
+    # Resumo por oficina considerando total encontrado, canceladas e acionáveis.
+    resumo_oficinas = (
+        base_consultor_todas
         .groupby(
             [
                 "Chave Oficina",
@@ -3361,8 +3376,9 @@ elif pagina == "📞 Follow":
             dropna=False,
         )
         .agg(
-            Agendadas=("Oficina", "size"),
-            OS=(
+            Encontradas=("Oficina", "size"),
+            Canceladas=("__Cancelada", "sum"),
+            OS_Todas=(
                 "OS",
                 lambda serie: sorted(
                     {
@@ -3374,15 +3390,74 @@ elif pagina == "📞 Follow":
             ),
         )
         .reset_index()
-        .sort_values(
-            ["Agendadas", "Oficina"],
-            ascending=[False, True],
+    )
+
+    acionaveis = (
+        base_consultor
+        .groupby(
+            [
+                "Chave Oficina",
+                "Oficina",
+                "WhatsApp",
+                "Prioridade",
+            ],
+            dropna=False,
         )
+        .agg(
+            Para_Follow=("Oficina", "size"),
+            OS_Follow=(
+                "OS",
+                lambda serie: sorted(
+                    {
+                        texto_limpo(valor)
+                        for valor in serie
+                        if texto_limpo(valor)
+                    }
+                ),
+            ),
+        )
+        .reset_index()
+    )
+
+    agrupado = resumo_oficinas.merge(
+        acionaveis,
+        on=[
+            "Chave Oficina",
+            "Oficina",
+            "WhatsApp",
+            "Prioridade",
+        ],
+        how="left",
+    )
+
+    agrupado["Para_Follow"] = (
+        agrupado["Para_Follow"]
+        .fillna(0)
+        .astype(int)
+    )
+    agrupado["Canceladas"] = (
+        agrupado["Canceladas"]
+        .fillna(0)
+        .astype(int)
+    )
+    agrupado["OS_Follow"] = agrupado["OS_Follow"].apply(
+        lambda valor: valor if isinstance(valor, list) else []
+    )
+
+    # Só exibimos oficinas que ainda têm pelo menos uma manutenção acionável.
+    agrupado = agrupado[
+        agrupado["Para_Follow"] > 0
+    ].copy()
+
+    agrupado = agrupado.sort_values(
+        ["Para_Follow", "Oficina"],
+        ascending=[False, True],
     )
 
     if agrupado.empty:
         st.info(
-            "Não há oficinas para o consultor selecionado."
+            "Não há manutenções acionáveis para Follow "
+            "neste consultor/data. As encontradas podem estar canceladas."
         )
         st.stop()
 
@@ -3394,6 +3469,10 @@ elif pagina == "📞 Follow":
 
     st.divider()
     st.markdown("### Oficinas para contato")
+    st.caption(
+        "O Follow considera somente manutenções vigentes e não canceladas. "
+        "As canceladas continuam armazenadas para histórico e auditoria."
+    )
 
     quantidade_maxima = len(agrupado)
 
@@ -3426,12 +3505,19 @@ elif pagina == "📞 Follow":
             texto_limpo(linha["Prioridade"])
             or "Normal"
         )
+
+        qtd_encontradas = int(
+            linha["Encontradas"]
+        )
+        qtd_canceladas = int(
+            linha["Canceladas"]
+        )
         qtd_agendadas = int(
-            linha["Agendadas"]
+            linha["Para_Follow"]
         )
         os_agendadas = list(
-            linha["OS"]
-            if isinstance(linha["OS"], list)
+            linha["OS_Follow"]
+            if isinstance(linha["OS_Follow"], list)
             else []
         )
 
@@ -3446,8 +3532,8 @@ elif pagina == "📞 Follow":
         )
 
         with st.container(border=True):
-            topo1, topo2, topo3 = st.columns(
-                [5, 2, 2]
+            topo1, topo2, topo3, topo4 = st.columns(
+                [4, 1.5, 1.5, 2]
             )
 
             topo1.subheader(oficina)
@@ -3455,8 +3541,16 @@ elif pagina == "📞 Follow":
                 f"Prioridade: {prioridade}"
             )
             topo2.metric(
-                "Agendadas",
+                "Encontradas",
+                qtd_encontradas,
+            )
+            topo3.metric(
+                "Para Follow",
                 qtd_agendadas,
+            )
+            topo4.metric(
+                "Canceladas",
+                qtd_canceladas,
             )
 
             status = texto_limpo(
@@ -3471,14 +3565,14 @@ elif pagina == "📞 Follow":
                 if resposta
                 else status
             )
-            topo3.metric(
-                "Status Follow",
-                status_exibir,
+
+            st.caption(
+                f"Status do Follow: **{status_exibir}**"
             )
 
             if os_agendadas:
                 st.caption(
-                    "OS: "
+                    "OS para Follow: "
                     + ", ".join(
                         os_agendadas[:12]
                     )
