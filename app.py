@@ -1,9 +1,11 @@
+import html
 import io
 import re
 import unicodedata
+import uuid
 from datetime import date, datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -1878,6 +1880,527 @@ def dataframe_para_excel(
     return buffer.getvalue()
 
 
+
+# =========================================================
+# FOLLOW — WHATSAPP, FORMULÁRIO E MÉTRICAS
+# =========================================================
+
+MOTIVOS_IMPEDIMENTO = [
+    "Veículo indisponível",
+    "Cliente solicitou alteração da data",
+    "Falta de equipamento ou ferramenta",
+    "Falta de peça ou insumo",
+    "Problema técnico sem solução",
+    "Técnico/equipe indisponível",
+    "Oficina sem capacidade para a data",
+    "Dificuldade de acesso ou deslocamento",
+    "Dados/OS insuficientes para executar",
+    "Outro",
+]
+
+
+def obter_url_publica_app() -> str:
+    """
+    Usa a URL atual do Streamlit para montar o link público do formulário.
+    Se APP_PUBLIC_URL estiver configurada nos Secrets, ela tem prioridade.
+    """
+    configurada = texto_limpo(
+        st.secrets.get("APP_PUBLIC_URL", "")
+    )
+
+    if configurada:
+        return configurada.rstrip("/")
+
+    try:
+        atual = str(st.context.url)
+        partes = urlsplit(atual)
+        return urlunsplit(
+            (
+                partes.scheme,
+                partes.netloc,
+                partes.path,
+                "",
+                "",
+            )
+        ).rstrip("/")
+    except Exception:
+        return ""
+
+
+def montar_url_formulario_follow(token: str) -> str:
+    base = obter_url_publica_app()
+
+    if not base:
+        return ""
+
+    return f"{base}?follow_token={quote(token)}"
+
+
+def buscar_follow_por_token(token: str) -> dict | None:
+    cliente = exigir_supabase()
+    resposta = (
+        cliente.table("follow_contatos")
+        .select("*")
+        .eq("token", token)
+        .limit(1)
+        .execute()
+    )
+
+    if not resposta.data:
+        return None
+
+    return resposta.data[0]
+
+
+def obter_ou_criar_follow(
+    data_manutencao: str,
+    chave_oficina: str,
+    oficina: str,
+    consultor: str,
+    telefone: str,
+    qtd_agendadas: int,
+    os_agendadas: list[str],
+) -> dict:
+    cliente = exigir_supabase()
+
+    resposta = (
+        cliente.table("follow_contatos")
+        .select("*")
+        .eq("data_manutencao", data_manutencao)
+        .eq("chave_oficina", chave_oficina)
+        .eq("consultor", consultor)
+        .limit(1)
+        .execute()
+    )
+
+    token = (
+        texto_limpo(resposta.data[0].get("token"))
+        if resposta.data
+        else str(uuid.uuid4())
+    )
+
+    url_formulario = montar_url_formulario_follow(token)
+
+    mensagem = (
+        f"Olá! Sua oficina possui {qtd_agendadas} "
+        f"manutenção(ões) agendada(s) para "
+        f"{pd.to_datetime(data_manutencao).strftime('%d/%m/%Y')}. "
+        f"Precisamos confirmar se existe algum impedimento para a execução. "
+        f"Por favor, responda o formulário: {url_formulario}"
+    )
+
+    registro = {
+        "token": token,
+        "data_follow": datetime.now(
+            FUSO_BRASIL
+        ).date().isoformat(),
+        "data_manutencao": data_manutencao,
+        "chave_oficina": chave_oficina,
+        "oficina": oficina,
+        "consultor": consultor or "Não definido",
+        "telefone": telefone,
+        "qtd_agendadas": int(qtd_agendadas),
+        "os_agendadas": os_agendadas,
+        "mensagem": mensagem,
+        "ultima_atualizacao": datetime.now(
+            FUSO_BRASIL
+        ).isoformat(),
+    }
+
+    if resposta.data:
+        cliente.table("follow_contatos").update(
+            registro
+        ).eq(
+            "id",
+            resposta.data[0]["id"],
+        ).execute()
+    else:
+        registro["status"] = "Preparado"
+        registro["preparado_em"] = datetime.now(
+            FUSO_BRASIL
+        ).isoformat()
+        cliente.table("follow_contatos").insert(
+            registro
+        ).execute()
+
+    atualizado = (
+        cliente.table("follow_contatos")
+        .select("*")
+        .eq("token", token)
+        .limit(1)
+        .execute()
+    )
+
+    return atualizado.data[0]
+
+
+def registrar_envio_follow(follow_id: int) -> None:
+    cliente = exigir_supabase()
+    agora = datetime.now(FUSO_BRASIL).isoformat()
+
+    cliente.table("follow_contatos").update(
+        {
+            "status": "Enviado",
+            "enviado_em": agora,
+            "ultima_atualizacao": agora,
+        }
+    ).eq("id", follow_id).execute()
+
+
+def botao_whatsapp_web(
+    telefone: str,
+    mensagem: str,
+    identificador: str,
+) -> None:
+    """
+    Abre exclusivamente o WhatsApp Web no navegador.
+    Não chama whatsapp:// nem tenta iniciar WhatsApp.exe.
+    Isso evita bloqueios do antivírus corporativo/Cortex XDR.
+    """
+    numero = limpar_telefone(telefone)
+
+    if not numero:
+        st.warning("Sem WhatsApp cadastrado.")
+        return
+
+    texto_url = quote(mensagem)
+    link_web = (
+        f"https://web.whatsapp.com/send"
+        f"?phone={numero}&text={texto_url}"
+    )
+
+    link_web_seguro = html.escape(
+        link_web,
+        quote=True,
+    )
+
+    st.markdown(
+        f"""
+        <a
+          href="{link_web_seguro}"
+          target="_blank"
+          rel="noopener noreferrer"
+          style="
+            display:inline-block;
+            width:100%;
+            text-align:center;
+            padding:0.62rem 0.85rem;
+            border-radius:0.5rem;
+            text-decoration:none;
+            font-weight:600;
+            border:1px solid rgba(49,51,63,.25);
+          "
+        >📱 Abrir no WhatsApp Web</a>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def exibir_formulario_publico_follow() -> bool:
+    """
+    Se houver ?follow_token=..., a página vira somente o formulário
+    público da oficina. O técnico não precisa acessar o restante do painel.
+    """
+    token = texto_limpo(
+        st.query_params.get("follow_token", "")
+    )
+
+    if not token:
+        return False
+
+    exigir_supabase()
+    follow = buscar_follow_por_token(token)
+
+    st.title("✅ Confirmação de Manutenção")
+    st.caption(
+        "Formulário de confirmação preventiva da oficina."
+    )
+
+    if follow is None:
+        st.error(
+            "Este formulário não foi encontrado ou o link é inválido."
+        )
+        return True
+
+    data_formatada = pd.to_datetime(
+        follow["data_manutencao"]
+    ).strftime("%d/%m/%Y")
+
+    st.info(
+        f"Oficina: **{texto_limpo(follow.get('oficina'))}** · "
+        f"Data: **{data_formatada}** · "
+        f"Manutenções: **{int(follow.get('qtd_agendadas') or 0)}**"
+    )
+
+    os_disponiveis = [
+        texto_limpo(valor)
+        for valor in (follow.get("os_agendadas") or [])
+        if texto_limpo(valor)
+    ]
+
+    with st.form("form_follow_publico"):
+        nome_respondente = st.text_input(
+            "Seu nome"
+        )
+
+        equipamentos = st.radio(
+            "Você possui todos os equipamentos/ferramentas necessários?",
+            ["Sim", "Não"],
+            horizontal=True,
+        )
+
+        veiculo = st.radio(
+            "O(s) veículo(s) estará(ão) disponível(is) para atendimento?",
+            ["Sim", "Não", "Não sei"],
+            horizontal=True,
+        )
+
+        capacidade = st.radio(
+            "A oficina possui técnico/capacidade para atender na data?",
+            ["Sim", "Não"],
+            horizontal=True,
+        )
+
+        impedimento = st.radio(
+            "Existe algum impedimento que possa impedir a execução?",
+            ["Não, está tudo OK", "Sim, existe impedimento"],
+        )
+
+        tem_impedimento = (
+            impedimento == "Sim, existe impedimento"
+        )
+
+        motivos = []
+        os_afetadas = []
+        observacao = ""
+        previsao = ""
+
+        if tem_impedimento:
+            motivos = st.multiselect(
+                "Qual(is) o(s) impedimento(s)?",
+                MOTIVOS_IMPEDIMENTO,
+            )
+
+            if os_disponiveis:
+                os_afetadas = st.multiselect(
+                    "Quais OS podem ser afetadas?",
+                    os_disponiveis,
+                )
+
+            observacao = st.text_area(
+                "Explique o impedimento",
+                placeholder=(
+                    "Descreva o que pode impedir a execução e "
+                    "qual apoio seria necessário."
+                ),
+            )
+
+            previsao = st.text_input(
+                "Previsão para solução/regularização (opcional)"
+            )
+        else:
+            observacao = st.text_area(
+                "Observação (opcional)"
+            )
+
+        enviar = st.form_submit_button(
+            "Enviar confirmação",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if enviar:
+        if not texto_limpo(nome_respondente):
+            st.error("Informe seu nome antes de enviar.")
+            return True
+
+        if tem_impedimento and not motivos:
+            st.error(
+                "Selecione ao menos um motivo do impedimento."
+            )
+            return True
+
+        cliente = exigir_supabase()
+        agora = datetime.now(FUSO_BRASIL).isoformat()
+
+        cliente.table("follow_respostas").insert(
+            {
+                "follow_id": follow["id"],
+                "token": token,
+                "nome_respondente": nome_respondente,
+                "equipamentos_ok": equipamentos == "Sim",
+                "veiculo_disponivel": veiculo,
+                "capacidade_ok": capacidade == "Sim",
+                "tem_impedimento": tem_impedimento,
+                "motivos": motivos,
+                "os_afetadas": os_afetadas,
+                "observacao": observacao,
+                "previsao_solucao": previsao,
+                "respondido_em": agora,
+            }
+        ).execute()
+
+        status_resposta = (
+            "Com impedimento"
+            if tem_impedimento
+            else "Sem impedimento"
+        )
+
+        cliente.table("follow_contatos").update(
+            {
+                "status": "Respondido",
+                "respondido_em": agora,
+                "tem_impedimento": tem_impedimento,
+                "status_resposta": status_resposta,
+                "ultima_atualizacao": agora,
+            }
+        ).eq(
+            "id",
+            follow["id"],
+        ).execute()
+
+        st.success(
+            "Resposta registrada. Obrigado pela confirmação."
+        )
+
+        if tem_impedimento:
+            st.warning(
+                "O impedimento foi registrado para acompanhamento."
+            )
+        else:
+            st.success(
+                "Atendimento confirmado sem impedimento informado."
+            )
+
+    return True
+
+
+def carregar_metricas_follow(
+    consultor: str,
+    data_manutencao: str,
+) -> pd.DataFrame:
+    registros = buscar_todos(
+        "follow_contatos",
+        filtros={
+            "consultor": consultor,
+            "data_manutencao": data_manutencao,
+        },
+        ordem="id",
+    )
+
+    return pd.DataFrame(registros)
+
+
+def exibir_metricas_follow(
+    consultor: str,
+    data_manutencao: str,
+    total_oficinas: int,
+) -> None:
+    contatos = carregar_metricas_follow(
+        consultor,
+        data_manutencao,
+    )
+
+    if contatos.empty:
+        preparados = enviados = respondidos = 0
+        com_impedimento = sem_impedimento = 0
+    else:
+        preparados = len(contatos)
+        enviados = int(
+            contatos["enviado_em"].notna().sum()
+            if "enviado_em" in contatos.columns
+            else 0
+        )
+        respondidos = int(
+            contatos["respondido_em"].notna().sum()
+            if "respondido_em" in contatos.columns
+            else 0
+        )
+        com_impedimento = int(
+            (
+                contatos.get(
+                    "tem_impedimento",
+                    pd.Series(dtype=bool),
+                )
+                == True
+            ).sum()
+        )
+        sem_impedimento = int(
+            (
+                contatos.get(
+                    "tem_impedimento",
+                    pd.Series(dtype=bool),
+                )
+                == False
+            ).sum()
+        )
+
+    sem_resposta = max(enviados - respondidos, 0)
+
+    st.markdown("#### Métricas do Follow")
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+    c1.metric("Oficinas no follow", total_oficinas)
+    c2.metric("Preparadas", preparados)
+    c3.metric("Enviadas", enviados)
+    c4.metric("Respondidas", respondidos)
+    c5.metric("Com impedimento", com_impedimento)
+    c6.metric("Sem resposta", sem_resposta)
+
+    if respondidos:
+        taxa = respondidos / enviados * 100 if enviados else 0
+        st.caption(
+            f"Taxa de resposta: **{taxa:.1f}%** · "
+            f"Sem impedimento: **{sem_impedimento}**."
+        )
+
+
+def exibir_respostas_follow(
+    consultor: str,
+    data_manutencao: str,
+) -> None:
+    contatos = carregar_metricas_follow(
+        consultor,
+        data_manutencao,
+    )
+
+    if contatos.empty:
+        return
+
+    respondidos = contatos[
+        contatos["respondido_em"].notna()
+    ].copy()
+
+    if respondidos.empty:
+        return
+
+    st.markdown("#### Respostas recebidas")
+
+    colunas = [
+        "oficina",
+        "qtd_agendadas",
+        "status_resposta",
+        "respondido_em",
+    ]
+    colunas = [
+        coluna
+        for coluna in colunas
+        if coluna in respondidos.columns
+    ]
+
+    st.dataframe(
+        respondidos[colunas],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+# Se o link recebido no WhatsApp tiver um token, mostramos somente
+# o formulário público e encerramos a execução do painel normal.
+if exibir_formulario_publico_follow():
+    st.stop()
+
+
 # =========================================================
 # CABEÇALHO E MENU
 # =========================================================
@@ -1910,7 +2433,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.1.1 — Correção do Follow com uma única oficina"
+        "Versão 2.2.1 — Follow com WhatsApp Web, formulário e métricas"
     )
 
 
@@ -2779,11 +3302,17 @@ elif pagina == "📞 Follow":
     )
 
     if not datas:
-        st.warning("Não existe planejado salvo.")
+        st.warning("Não existe agendamento salvo.")
         st.stop()
 
+    st.subheader("Follow preventivo das oficinas")
+    st.caption(
+        "Confirme antecipadamente as manutenções agendadas, "
+        "registre os contatos e acompanhe impedimentos."
+    )
+
     data_selecionada = st.selectbox(
-        "Data do follow",
+        "Data das manutenções",
         datas,
         format_func=lambda valor: pd.to_datetime(valor).strftime(
             "%d/%m/%Y"
@@ -2799,69 +3328,252 @@ elif pagina == "📞 Follow":
         st.warning("Cadastre as oficinas.")
         st.stop()
 
-    base = enriquecer_com_cadastro(planejado, cadastro)
-    consultores = sorted(base["Consultor"].dropna().unique().tolist())
-    consultor = st.selectbox("Consultor", consultores)
-    base_consultor = base[base["Consultor"] == consultor]
+    # Para follow usamos somente a fotografia vigente do planejamento.
+    if "__Ativa no Planejamento" in planejado.columns:
+        planejado = planejado[
+            planejado["__Ativa no Planejamento"] == True
+        ].copy()
 
-    ranking = (
-        base_consultor
-        .groupby(
-            ["Oficina", "WhatsApp", "Prioridade"],
-            dropna=False,
-        )
-        .size()
-        .reset_index(name="Planejadas")
-        .sort_values("Planejadas", ascending=False)
+    base = enriquecer_com_cadastro(
+        planejado,
+        cadastro,
     )
 
-    if ranking.empty:
-        st.info("Não há oficinas para o consultor selecionado.")
+    consultores = sorted(
+        {
+            texto_limpo(valor)
+            for valor in base["Consultor"]
+            if texto_limpo(valor)
+        }
+    )
+
+    if not consultores:
+        st.warning(
+            "Nenhum consultor foi relacionado às oficinas desta data."
+        )
         st.stop()
 
-    # O Streamlit não aceita slider com mínimo e máximo iguais.
-    # Se houver apenas uma oficina no ranking, usamos 1 diretamente.
-    if len(ranking) == 1:
+    consultor = st.selectbox(
+        "Consultor",
+        consultores,
+    )
+
+    base_consultor = base[
+        base["Consultor"] == consultor
+    ].copy()
+
+    if base_consultor.empty:
+        st.info(
+            "Não há manutenções agendadas para este consultor."
+        )
+        st.stop()
+
+    # Lista as OS por oficina para enviar no formulário.
+    agrupado = (
+        base_consultor
+        .groupby(
+            [
+                "Chave Oficina",
+                "Oficina",
+                "WhatsApp",
+                "Prioridade",
+            ],
+            dropna=False,
+        )
+        .agg(
+            Agendadas=("Oficina", "size"),
+            OS=(
+                "OS",
+                lambda serie: sorted(
+                    {
+                        texto_limpo(valor)
+                        for valor in serie
+                        if texto_limpo(valor)
+                    }
+                ),
+            ),
+        )
+        .reset_index()
+        .sort_values(
+            ["Agendadas", "Oficina"],
+            ascending=[False, True],
+        )
+    )
+
+    if agrupado.empty:
+        st.info(
+            "Não há oficinas para o consultor selecionado."
+        )
+        st.stop()
+
+    exibir_metricas_follow(
+        consultor,
+        data_selecionada,
+        len(agrupado),
+    )
+
+    st.divider()
+    st.markdown("### Oficinas para contato")
+
+    quantidade_maxima = len(agrupado)
+
+    if quantidade_maxima == 1:
         quantidade = 1
-        st.caption("1 oficina disponível para o consultor selecionado.")
+        st.caption(
+            "1 oficina disponível para o consultor selecionado."
+        )
     else:
         quantidade = st.slider(
-            "Quantidade de oficinas",
+            "Quantidade de oficinas exibidas",
             min_value=1,
-            max_value=len(ranking),
-            value=min(3, len(ranking)),
+            max_value=quantidade_maxima,
+            value=min(3, quantidade_maxima),
         )
 
-    for _, linha in ranking.head(quantidade).iterrows():
+    for _, linha in agrupado.head(
+        quantidade
+    ).iterrows():
+        chave_oficina = texto_limpo(
+            linha["Chave Oficina"]
+        )
+        oficina = texto_limpo(
+            linha["Oficina"]
+        )
+        telefone = limpar_telefone(
+            linha["WhatsApp"]
+        )
+        prioridade = (
+            texto_limpo(linha["Prioridade"])
+            or "Normal"
+        )
+        qtd_agendadas = int(
+            linha["Agendadas"]
+        )
+        os_agendadas = list(
+            linha["OS"]
+            if isinstance(linha["OS"], list)
+            else []
+        )
+
+        follow = obter_ou_criar_follow(
+            data_manutencao=data_selecionada,
+            chave_oficina=chave_oficina,
+            oficina=oficina,
+            consultor=consultor,
+            telefone=telefone,
+            qtd_agendadas=qtd_agendadas,
+            os_agendadas=os_agendadas,
+        )
+
         with st.container(border=True):
-            col1, col2, col3 = st.columns([5, 2, 2])
-
-            oficina = texto_limpo(linha["Oficina"])
-            col1.subheader(oficina)
-            col1.caption(
-                f"Prioridade: "
-                f"{texto_limpo(linha['Prioridade']) or 'Normal'}"
-            )
-            col2.metric("Planejadas", int(linha["Planejadas"]))
-
-            telefone = limpar_telefone(linha["WhatsApp"])
-            mensagem = (
-                f"Bom dia! Sua oficina possui "
-                f"{int(linha['Planejadas'])} serviço(s) "
-                f"programado(s) para {pd.to_datetime(data_selecionada).strftime('%d/%m/%Y')}. "
-                f"Existe algum impedimento para a execução? "
-                f"Caso exista, informe para que possamos atuar preventivamente."
+            topo1, topo2, topo3 = st.columns(
+                [5, 2, 2]
             )
 
-            if telefone:
-                link = (
-                    f"https://wa.me/{telefone}"
-                    f"?text={quote(mensagem)}"
+            topo1.subheader(oficina)
+            topo1.caption(
+                f"Prioridade: {prioridade}"
+            )
+            topo2.metric(
+                "Agendadas",
+                qtd_agendadas,
+            )
+
+            status = texto_limpo(
+                follow.get("status", "Preparado")
+            )
+            resposta = texto_limpo(
+                follow.get("status_resposta", "")
+            )
+
+            status_exibir = (
+                f"{status} · {resposta}"
+                if resposta
+                else status
+            )
+            topo3.metric(
+                "Status Follow",
+                status_exibir,
+            )
+
+            if os_agendadas:
+                st.caption(
+                    "OS: "
+                    + ", ".join(
+                        os_agendadas[:12]
+                    )
+                    + (
+                        "..."
+                        if len(os_agendadas) > 12
+                        else ""
+                    )
                 )
-                col3.link_button(
-                    "📱 Abrir WhatsApp",
-                    link,
+
+            formulario = montar_url_formulario_follow(
+                texto_limpo(follow["token"])
+            )
+
+            st.text_area(
+                "Mensagem preparada",
+                texto_limpo(follow["mensagem"]),
+                height=120,
+                key=f"msg_{follow['id']}",
+            )
+
+            col_whats, col_envio, col_form = st.columns(
+                [2, 2, 2]
+            )
+
+            with col_whats:
+                botao_whatsapp_web(
+                    telefone,
+                    texto_limpo(follow["mensagem"]),
+                    str(follow["id"]),
+                )
+
+            with col_envio:
+                if st.button(
+                    "✅ Registrar envio",
+                    key=f"envio_{follow['id']}",
                     use_container_width=True,
-                )
-            else:
-                col3.warning("Sem WhatsApp")
+                    help=(
+                        "Use depois de enviar a mensagem para "
+                        "registrar o contato no histórico."
+                    ),
+                ):
+                    registrar_envio_follow(
+                        int(follow["id"])
+                    )
+                    st.success(
+                        "Envio registrado."
+                    )
+                    st.rerun()
+
+            with col_form:
+                if formulario:
+                    st.markdown(
+                        f"[🔗 Abrir formulário de teste]"
+                        f"({formulario})"
+                    )
+                else:
+                    st.warning(
+                        "Não foi possível gerar a URL pública."
+                    )
+
+            if follow.get("respondido_em"):
+                if bool(
+                    follow.get("tem_impedimento")
+                ):
+                    st.warning(
+                        "⚠️ A oficina informou impedimento."
+                    )
+                else:
+                    st.success(
+                        "✅ Oficina confirmou sem impedimento."
+                    )
+
+    st.divider()
+    exibir_respostas_follow(
+        consultor,
+        data_selecionada,
+    )
