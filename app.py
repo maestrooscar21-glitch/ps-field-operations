@@ -691,6 +691,48 @@ def conciliar_bases(
         indicator=True,
     )
 
+    # Auditoria de substituição de OS:
+    # se a OS planejada não aparece pelo mesmo atendimento, procuramos
+    # outra OS no resultado com o MESMO Ticket Jira + MESMA placa.
+    # Nessa situação, não declaramos no-show automaticamente.
+    def chave_ticket_placa(ticket, placa) -> str:
+        ticket_norm = normalizar_texto(ticket)
+        placa_norm = normalizar_texto(placa)
+
+        if not ticket_norm or not placa_norm:
+            return ""
+
+        return f"{ticket_norm}||{placa_norm}"
+
+    chaves_resultado_ticket_placa = set()
+
+    for _, item in resumo_resultado.iterrows():
+        chave = chave_ticket_placa(
+            item.get("Ticket_resultado", ""),
+            item.get("Placa_resultado", ""),
+        )
+        if chave:
+            chaves_resultado_ticket_placa.add(chave)
+
+    def encontrou_substituicao_ticket_placa(linha) -> bool:
+        if linha.get("_merge") != "left_only":
+            return False
+
+        chave = chave_ticket_placa(
+            linha.get("Ticket_planejado", ""),
+            linha.get("Placa_planejada", ""),
+        )
+
+        return bool(
+            chave
+            and chave in chaves_resultado_ticket_placa
+        )
+
+    conciliacao["Possível substituição de OS"] = conciliacao.apply(
+        encontrou_substituicao_ticket_placa,
+        axis=1,
+    )
+
     def data_referencia_linha(linha) -> str | None:
         data_operacional = converter_data_operacional(
             linha.get("Data_operacional_planejada", "")
@@ -763,6 +805,13 @@ def conciliar_bases(
             if origem_merge == "left_only":
                 if status_cancelado(status_planejado):
                     return "Cancelada no agendamento"
+                if bool(
+                    linha.get(
+                        "Possível substituição de OS",
+                        False,
+                    )
+                ):
+                    return "Possível substituição de OS"
                 return "No-show"
 
             if origem_merge == "right_only":
@@ -801,6 +850,13 @@ def conciliar_bases(
 
         if origem_merge == "left_only":
             if agendada:
+                if bool(
+                    linha.get(
+                        "Possível substituição de OS",
+                        False,
+                    )
+                ):
+                    return "Possível substituição de OS"
                 return "No-show"
             return "Encaixe não realizado"
 
@@ -902,10 +958,19 @@ def conciliar_bases(
                 "A manutenção já estava cancelada na fotografia vigente "
                 f"do agendamento: {status_planejado}"
             )
+        if classificacao == "Possível substituição de OS":
+            return (
+                "A OS agendada não apareceu pelo mesmo atendimento, mas "
+                "foi localizada outra OS no resultado com o mesmo Ticket "
+                "Jira + mesma placa. O caso foi retirado do no-show para "
+                "auditoria de possível troca/substituição de OS."
+            )
         if classificacao == "No-show":
             return (
-                "Manutenção estava agendada antes do dia e não apareceu "
-                "no arquivo de resultado."
+                "Manutenção estava agendada antes do dia, a própria OS não "
+                "apareceu no resultado e nenhuma outra OS com o mesmo Ticket "
+                "Jira + mesma placa foi localizada. Classificada como "
+                "no-show provável."
             )
         if classificacao == "Encaixe não realizado":
             return (
@@ -1053,6 +1118,12 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         "Improdutivas extras": improdutivas_extras,
         "Canceladas": canceladas,
         "No-show": no_show,
+        "Possíveis substituições de OS": int(
+            (
+                conciliacao["Classificação"]
+                == "Possível substituição de OS"
+            ).sum()
+        ),
         "Executadas extras": executadas_extras,
         "MCI": mci,
         "MD": md,
@@ -2625,7 +2696,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.2.4 — Respostas detalhadas e horário de Brasília"
+        "Versão 2.2.5 — Auditoria de No-show por Ticket + placa"
     )
 
 
