@@ -2688,6 +2688,557 @@ def exibir_respostas_follow(
     )
 
 
+def atualizar_acao_follow(
+    follow_id: int,
+    status_acao: str,
+    responsavel_acao: str,
+    acao_tomada: str,
+    prazo_acao: str,
+    observacao_acao: str,
+) -> None:
+    cliente = exigir_supabase()
+    agora = datetime.now(FUSO_BRASIL).isoformat()
+
+    cliente.table("follow_contatos").update(
+        {
+            "status_acao": status_acao,
+            "responsavel_acao": responsavel_acao,
+            "acao_tomada": acao_tomada,
+            "prazo_acao": prazo_acao or None,
+            "observacao_acao": observacao_acao,
+            "acao_atualizada_em": agora,
+            "ultima_atualizacao": agora,
+        }
+    ).eq("id", follow_id).execute()
+
+
+def carregar_resposta_mais_recente_follow(follow_id: int) -> dict:
+    cliente = exigir_supabase()
+
+    resposta = (
+        cliente.table("follow_respostas")
+        .select("*")
+        .eq("follow_id", follow_id)
+        .order("respondido_em", desc=True)
+        .limit(1)
+        .execute()
+    )
+
+    if not resposta.data:
+        return {}
+
+    return resposta.data[0]
+
+
+def classificar_risco_follow(contato: dict, resposta: dict) -> str:
+    """
+    Classificação operacional simples para priorização do retorno.
+    Não altera MCI/MD; serve apenas para gestão de ações.
+    """
+    if not contato.get("respondido_em"):
+        return "Sem resposta"
+
+    if not bool(contato.get("tem_impedimento")):
+        return "Baixo"
+
+    equipamentos_ok = resposta.get("equipamentos_ok")
+    capacidade_ok = resposta.get("capacidade_ok")
+    veiculo = texto_limpo(resposta.get("veiculo_disponivel", ""))
+    motivos = resposta.get("motivos") or []
+
+    if (
+        equipamentos_ok is False
+        or capacidade_ok is False
+        or veiculo == "Não"
+        or len(motivos) >= 2
+    ):
+        return "Alto"
+
+    return "Médio"
+
+
+def exibir_cards_follow_acao(df: pd.DataFrame) -> None:
+    total = len(df)
+
+    sem_resposta = int(
+        (df["Risco"] == "Sem resposta").sum()
+    )
+    com_impedimento = int(
+        (df["Tem impedimento"] == True).sum()
+    )
+    alto = int(
+        (df["Risco"] == "Alto").sum()
+    )
+    pendentes_acao = int(
+        df["Status ação"].isin(
+            ["Não iniciado", "Em andamento"]
+        ).sum()
+    )
+    concluidas = int(
+        (df["Status ação"] == "Concluído").sum()
+    )
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Oficinas", total)
+    c2.metric("Sem resposta", sem_resposta)
+    c3.metric("Com impedimento", com_impedimento)
+    c4.metric("Risco alto", alto)
+    c5.metric("Ações pendentes", pendentes_acao)
+    c6.metric("Ações concluídas", concluidas)
+
+
+
+
+# =========================================================
+# FOLLOW × RESULTADO OFS — COERÊNCIA E EFETIVIDADE
+# =========================================================
+
+def categorizar_motivo_ofs(valor: str) -> str:
+    texto = normalizar_texto(valor)
+
+    if not texto:
+        return "Não informado"
+
+    if any(
+        termo in texto
+        for termo in [
+            "EQUIP",
+            "FERRAMENT",
+            "MATERIAL",
+            "PECA",
+            "INSUM",
+            "CABO",
+            "CHICOTE",
+        ]
+    ):
+        return "Equipamento / material"
+
+    if any(
+        termo in texto
+        for termo in [
+            "VEICUL",
+            "CARRO",
+            "CAMINHAO",
+            "FROTA",
+            "INDISPONIVEL",
+        ]
+    ):
+        return "Veículo indisponível"
+
+    if any(
+        termo in texto
+        for termo in [
+            "TECNIC",
+            "EQUIPE",
+            "CAPACIDADE",
+            "MAO DE OBRA",
+            "OFICINA",
+        ]
+    ):
+        return "Capacidade / técnico"
+
+    if any(
+        termo in texto
+        for termo in [
+            "CLIENT",
+            "SOLICITOU",
+            "LIBERAC",
+            "AUTORIZ",
+        ]
+    ):
+        return "Cliente"
+
+    if any(
+        termo in texto
+        for termo in [
+            "DESLOC",
+            "ACESS",
+            "DISTANC",
+            "ROTA",
+        ]
+    ):
+        return "Deslocamento / acesso"
+
+    if any(
+        termo in texto
+        for termo in [
+            "DADO",
+            "INFORMAC",
+            "OS",
+            "ORDEM",
+            "CADASTR",
+        ]
+    ):
+        return "Dados / OS"
+
+    return "Outro"
+
+
+def categorias_risco_follow(resposta: dict) -> set[str]:
+    categorias = set()
+
+    if resposta.get("equipamentos_ok") is False:
+        categorias.add("Equipamento / material")
+
+    veiculo = texto_limpo(
+        resposta.get("veiculo_disponivel", "")
+    )
+    if veiculo == "Não":
+        categorias.add("Veículo indisponível")
+
+    if resposta.get("capacidade_ok") is False:
+        categorias.add("Capacidade / técnico")
+
+    motivos = resposta.get("motivos") or []
+
+    for motivo in motivos:
+        categoria = categorizar_motivo_ofs(
+            str(motivo)
+        )
+        if categoria != "Não informado":
+            categorias.add(categoria)
+
+    return categorias
+
+
+def status_resultado_follow(
+    linhas_os: pd.DataFrame,
+) -> tuple[str, str, str]:
+    """
+    Retorna:
+    - status operacional resumido;
+    - motivo OFS consolidado;
+    - observação técnica consolidada.
+    """
+    if linhas_os.empty:
+        return (
+            "Sem desfecho localizado",
+            "",
+            "",
+        )
+
+    classes = set(
+        linhas_os["Classificação"]
+        .dropna()
+        .astype(str)
+        .tolist()
+    )
+
+    if any(
+        classe in classes
+        for classe in [
+            "Improdutiva agendada",
+            "Improdutiva extra",
+        ]
+    ):
+        status = "Improdutiva"
+    elif any(
+        classe in classes
+        for classe in [
+            "Executada agendada",
+            "Executada extra",
+        ]
+    ):
+        status = "Executada"
+    elif any(
+        classe in classes
+        for classe in [
+            "Cancelada",
+            "Cancelada extra",
+            "Cancelada no agendamento",
+        ]
+    ):
+        status = "Cancelada"
+    elif "No-show" in classes:
+        status = "No-show"
+    elif "Possível substituição de OS" in classes:
+        status = "Possível substituição de OS"
+    else:
+        status = "Outro"
+
+    motivos = juntar_unicos(
+        linhas_os.get(
+            "Razao_improdutiva",
+            pd.Series(dtype=str),
+        )
+    )
+    observacoes = juntar_unicos(
+        linhas_os.get(
+            "Observacao_tecnico_improdutiva",
+            pd.Series(dtype=str),
+        )
+    )
+
+    return status, motivos, observacoes
+
+
+def classificar_coerencia_follow(
+    contato: dict,
+    resposta: dict,
+    status_resultado: str,
+    motivo_ofs: str,
+) -> tuple[str, str]:
+    """
+    Analisa a relação entre o que a oficina informou antes
+    e o que efetivamente ocorreu depois no OFS.
+    """
+    respondeu = bool(contato.get("respondido_em"))
+
+    if not respondeu:
+        return (
+            "Sem resposta prévia",
+            "Não há resposta da oficina para comparar com o resultado.",
+        )
+
+    tem_impedimento = bool(
+        contato.get("tem_impedimento")
+    )
+
+    categorias_previstas = categorias_risco_follow(
+        resposta
+    )
+    categoria_resultado = categorizar_motivo_ofs(
+        motivo_ofs
+    )
+
+    if status_resultado == "Executada":
+        if tem_impedimento:
+            return (
+                "Risco tratado / execução realizada",
+                (
+                    "A oficina informou impedimento antes da execução, "
+                    "mas a manutenção foi concluída."
+                ),
+            )
+
+        return (
+            "Confirmação coerente",
+            (
+                "A oficina informou que estava tudo OK e a manutenção "
+                "foi executada."
+            ),
+        )
+
+    if status_resultado == "Improdutiva":
+        if not tem_impedimento:
+            if categoria_resultado != "Não informado":
+                return (
+                    "Divergência do Follow",
+                    (
+                        "A oficina informou previamente que estava tudo OK, "
+                        "mas a manutenção terminou improdutiva por motivo "
+                        f"relacionado a {categoria_resultado}."
+                    ),
+                )
+
+            return (
+                "Improdutiva não antecipada",
+                (
+                    "A oficina informou que estava tudo OK, mas a manutenção "
+                    "terminou improdutiva. O motivo OFS não permite identificar "
+                    "uma categoria específica."
+                ),
+            )
+
+        if (
+            categoria_resultado in categorias_previstas
+            and categoria_resultado != "Não informado"
+        ):
+            return (
+                "Risco antecipado pelo Follow",
+                (
+                    "O impedimento informado antes da execução coincide "
+                    "com a categoria do motivo de improdutividade no OFS."
+                ),
+            )
+
+        return (
+            "Risco informado, motivo diferente",
+            (
+                "A oficina informou impedimento antes da execução, porém "
+                "o motivo final da improdutividade não coincide com o risco "
+                "registrado no Follow."
+            ),
+        )
+
+    if status_resultado == "No-show":
+        if tem_impedimento:
+            return (
+                "Risco informado / não executada",
+                (
+                    "A oficina informou impedimento e a manutenção não teve "
+                    "desfecho de execução localizado."
+                ),
+            )
+        return (
+            "No-show não antecipado",
+            (
+                "A oficina informou que estava tudo OK, mas a manutenção "
+                "foi classificada como no-show."
+            ),
+        )
+
+    if status_resultado == "Cancelada":
+        if tem_impedimento:
+            return (
+                "Risco informado / cancelada",
+                (
+                    "A oficina informou impedimento e a manutenção acabou "
+                    "cancelada."
+                ),
+            )
+        return (
+            "Cancelamento não antecipado",
+            (
+                "A oficina informou que estava tudo OK, mas a manutenção "
+                "acabou cancelada."
+            ),
+        )
+
+    if status_resultado == "Possível substituição de OS":
+        return (
+            "Requer auditoria de OS",
+            (
+                "Há indício de substituição de OS; a coerência do Follow "
+                "não deve ser concluída automaticamente."
+            ),
+        )
+
+    return (
+        "Sem conclusão",
+        (
+            "Não foi localizado desfecho suficiente para avaliar a "
+            "coerência entre Follow e resultado."
+        ),
+    )
+
+
+def montar_base_follow_resultado(
+    contatos: pd.DataFrame,
+    consolidado: pd.DataFrame,
+) -> pd.DataFrame:
+    linhas = []
+
+    for _, contato in contatos.iterrows():
+        follow_id = int(contato["id"])
+        resposta = carregar_resposta_mais_recente_follow(
+            follow_id
+        )
+
+        data_manutencao = texto_limpo(
+            contato.get("data_manutencao")
+        )
+        os_follow = contato.get("os_agendadas") or []
+
+        os_norm = {
+            normalizar_texto(os_numero)
+            for os_numero in os_follow
+            if texto_limpo(os_numero)
+        }
+
+        base_data = consolidado[
+            consolidado["Data Operacional"].astype(str)
+            == str(data_manutencao)
+        ].copy()
+
+        if os_norm:
+            mascara = pd.Series(
+                False,
+                index=base_data.index,
+            )
+
+            for coluna in [
+                "OS_planejada",
+                "OS_resultado",
+            ]:
+                if coluna in base_data.columns:
+                    mascara = mascara | base_data[coluna].apply(
+                        lambda valor: any(
+                            normalizar_texto(parte)
+                            in os_norm
+                            for parte in str(valor).split("|")
+                            if texto_limpo(parte)
+                        )
+                    )
+
+            linhas_os = base_data[
+                mascara
+            ].copy()
+        else:
+            linhas_os = pd.DataFrame(
+                columns=base_data.columns
+            )
+
+        status_resultado, motivo_ofs, obs_tecnico = (
+            status_resultado_follow(
+                linhas_os
+            )
+        )
+
+        coerencia, explicacao = (
+            classificar_coerencia_follow(
+                contato.to_dict(),
+                resposta,
+                status_resultado,
+                motivo_ofs,
+            )
+        )
+
+        categorias_previstas = sorted(
+            categorias_risco_follow(
+                resposta
+            )
+        )
+
+        linhas.append(
+            {
+                "Follow ID": follow_id,
+                "Data": data_manutencao,
+                "Consultor": texto_limpo(
+                    contato.get("consultor")
+                ),
+                "Oficina": texto_limpo(
+                    contato.get("oficina")
+                ),
+                "Qtd agendadas": int(
+                    contato.get("qtd_agendadas") or 0
+                ),
+                "Respondido": bool(
+                    contato.get("respondido_em")
+                ),
+                "Tem impedimento": bool(
+                    contato.get("tem_impedimento")
+                )
+                if contato.get("respondido_em")
+                else False,
+                "Riscos informados": " | ".join(
+                    categorias_previstas
+                ),
+                "Resultado OFS": status_resultado,
+                "Razão da Improdutiva": motivo_ofs,
+                "Categoria motivo OFS": categorizar_motivo_ofs(
+                    motivo_ofs
+                ),
+                "Observação do Técnico": obs_tecnico,
+                "Coerência Follow × Resultado": coerencia,
+                "Leitura": explicacao,
+                "Status ação": texto_limpo(
+                    contato.get("status_acao")
+                ) or "Não iniciado",
+                "Responsável ação": texto_limpo(
+                    contato.get("responsavel_acao")
+                ),
+                "Prazo ação": texto_limpo(
+                    contato.get("prazo_acao")
+                ),
+            }
+        )
+
+    return pd.DataFrame(linhas)
+
+
+
+
 # Se o link recebido no WhatsApp tiver um token, mostramos somente
 # o formulário público e encerramos a execução do painel normal.
 if exibir_formulario_publico_follow():
@@ -2722,12 +3273,14 @@ with st.sidebar:
             "🏆 Ranking por Consultor",
             "📞 Follow",
             "📉 Dashboard de Improdutividade",
+            "🧭 Painel de Ações do Follow",
+            "🔄 Follow × Resultado OFS",
         ],
     )
 
     st.divider()
     st.caption(
-        "Versão 2.2.7 — Dashboard analítico de improdutividade"
+        "Versão 2.2.9 — Follow × Resultado OFS e análise de coerência"
     )
 
 
@@ -4048,6 +4601,815 @@ elif pagina == "📉 Dashboard de Improdutividade":
 # =========================================================
 # FOLLOW
 # =========================================================
+
+elif pagina == "🔄 Follow × Resultado OFS":
+    exigir_supabase()
+
+    st.subheader("🔄 Follow × Resultado OFS")
+    st.caption(
+        "Compara o que a oficina informou antes da execução com o "
+        "resultado real registrado posteriormente no OFS."
+    )
+
+    contatos = pd.DataFrame(
+        buscar_todos(
+            "follow_contatos",
+            ordem="data_manutencao",
+            desc=True,
+        )
+    )
+
+    if contatos.empty:
+        st.info("Ainda não existem registros de Follow.")
+        st.stop()
+
+    bases = listar_bases()
+
+    if bases.empty:
+        st.warning("Não existem bases de resultado para cruzamento.")
+        st.stop()
+
+    datas_planejado = set(
+        bases.loc[
+            bases["tipo"] == "planejado",
+            "data_operacional",
+        ].astype(str)
+    )
+    datas_resultado = set(
+        bases.loc[
+            bases["tipo"] == "resultado",
+            "data_operacional",
+        ].astype(str)
+    )
+
+    datas_completas = sorted(
+        datas_planejado & datas_resultado
+    )
+
+    if not datas_completas:
+        st.warning(
+            "Não existe período com planejado e resultado salvos juntos."
+        )
+        st.stop()
+
+    cadastro = carregar_oficinas()
+    consolidado = carregar_consolidado(
+        datas_completas
+    )
+
+    if consolidado.empty:
+        st.warning(
+            "Não foi possível montar a base consolidada para o cruzamento."
+        )
+        st.stop()
+
+    if not cadastro.empty:
+        consolidado = enriquecer_com_cadastro(
+            consolidado,
+            cadastro,
+        )
+
+    cruzamento = montar_base_follow_resultado(
+        contatos,
+        consolidado,
+    )
+
+    if cruzamento.empty:
+        st.info("Não há dados suficientes para análise.")
+        st.stop()
+
+    st.markdown("### Filtros")
+
+    datas_validas = pd.to_datetime(
+        cruzamento["Data"],
+        errors="coerce",
+    ).dropna()
+
+    min_data = datas_validas.min().date()
+    max_data = datas_validas.max().date()
+
+    f1, f2, f3 = st.columns(3)
+
+    with f1:
+        periodo = st.date_input(
+            "Período",
+            value=(min_data, max_data),
+            min_value=min_data,
+            max_value=max_data,
+            key="cruz_follow_periodo",
+        )
+
+    with f2:
+        consultores = sorted(
+            {
+                texto_limpo(v)
+                for v in cruzamento["Consultor"]
+                if texto_limpo(v)
+            }
+        )
+        consultor_filtro = st.multiselect(
+            "Consultor",
+            consultores,
+            key="cruz_follow_consultor",
+        )
+
+    with f3:
+        tipos_coerencia = sorted(
+            cruzamento[
+                "Coerência Follow × Resultado"
+            ].dropna().unique().tolist()
+        )
+        coerencia_filtro = st.multiselect(
+            "Situação",
+            tipos_coerencia,
+            key="cruz_follow_coerencia",
+        )
+
+    if isinstance(periodo, (list, tuple)) and len(periodo) == 2:
+        inicio, fim = periodo
+    else:
+        inicio = fim = (
+            periodo[0]
+            if isinstance(periodo, (list, tuple))
+            else periodo
+        )
+
+    data_series = pd.to_datetime(
+        cruzamento["Data"],
+        errors="coerce",
+    ).dt.date
+
+    filtrado = cruzamento[
+        (data_series >= inicio)
+        & (data_series <= fim)
+    ].copy()
+
+    if consultor_filtro:
+        filtrado = filtrado[
+            filtrado["Consultor"].isin(
+                consultor_filtro
+            )
+        ]
+
+    if coerencia_filtro:
+        filtrado = filtrado[
+            filtrado[
+                "Coerência Follow × Resultado"
+            ].isin(coerencia_filtro)
+        ]
+
+    if filtrado.empty:
+        st.info("Nenhum registro encontrado com esses filtros.")
+        st.stop()
+
+    total = len(filtrado)
+    divergencias = int(
+        (
+            filtrado[
+                "Coerência Follow × Resultado"
+            ] == "Divergência do Follow"
+        ).sum()
+    )
+    riscos_antecipados = int(
+        (
+            filtrado[
+                "Coerência Follow × Resultado"
+            ] == "Risco antecipado pelo Follow"
+        ).sum()
+    )
+    riscos_tratados = int(
+        (
+            filtrado[
+                "Coerência Follow × Resultado"
+            ] == "Risco tratado / execução realizada"
+        ).sum()
+    )
+    coerentes = int(
+        (
+            filtrado[
+                "Coerência Follow × Resultado"
+            ] == "Confirmação coerente"
+        ).sum()
+    )
+    sem_resposta = int(
+        (
+            filtrado[
+                "Coerência Follow × Resultado"
+            ] == "Sem resposta prévia"
+        ).sum()
+    )
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Follows analisados", total)
+    c2.metric("Confirmações coerentes", coerentes)
+    c3.metric("Riscos antecipados", riscos_antecipados)
+    c4.metric("Riscos tratados", riscos_tratados)
+    c5.metric("Divergências", divergencias)
+    c6.metric("Sem resposta", sem_resposta)
+
+    st.divider()
+    st.markdown("### Placar de coerência")
+
+    resumo = (
+        filtrado[
+            "Coerência Follow × Resultado"
+        ]
+        .value_counts()
+        .rename_axis("Situação")
+        .reset_index(name="Quantidade")
+    )
+
+    grafico = px.bar(
+        resumo,
+        x="Quantidade",
+        y="Situação",
+        orientation="h",
+        text="Quantidade",
+    )
+    grafico.update_layout(
+        height=max(
+            420,
+            48 * len(resumo),
+        ),
+        yaxis={
+            "categoryorder": "total ascending"
+        },
+    )
+    st.plotly_chart(
+        grafico,
+        use_container_width=True,
+    )
+
+    st.divider()
+    st.markdown("### Casos que exigem atenção")
+
+    situacoes_criticas = [
+        "Divergência do Follow",
+        "Improdutiva não antecipada",
+        "Risco informado, motivo diferente",
+        "No-show não antecipado",
+        "Cancelamento não antecipado",
+        "Requer auditoria de OS",
+    ]
+
+    criticos = filtrado[
+        filtrado[
+            "Coerência Follow × Resultado"
+        ].isin(situacoes_criticas)
+    ].copy()
+
+    if criticos.empty:
+        st.success(
+            "Nenhuma divergência crítica encontrada no período selecionado."
+        )
+    else:
+        st.dataframe(
+            criticos[
+                [
+                    "Data",
+                    "Consultor",
+                    "Oficina",
+                    "Qtd agendadas",
+                    "Riscos informados",
+                    "Resultado OFS",
+                    "Razão da Improdutiva",
+                    "Categoria motivo OFS",
+                    "Coerência Follow × Resultado",
+                    "Leitura",
+                    "Status ação",
+                    "Responsável ação",
+                    "Prazo ação",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+            height=520,
+        )
+
+    st.divider()
+    st.markdown("### Base completa da análise")
+
+    st.dataframe(
+        filtrado,
+        use_container_width=True,
+        hide_index=True,
+        height=520,
+    )
+
+    st.download_button(
+        "⬇️ Baixar cruzamento Follow × OFS em Excel",
+        data=dataframe_para_excel(
+            filtrado,
+            "Follow_x_OFS",
+        ),
+        file_name="follow_x_resultado_ofs.xlsx",
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        use_container_width=True,
+    )
+
+
+elif pagina == "🧭 Painel de Ações do Follow":
+    exigir_supabase()
+
+    st.subheader("🧭 Painel de Ações do Follow")
+    st.caption(
+        "Transforma as respostas das oficinas em um placar operacional "
+        "com prioridade, impedimentos, responsáveis, prazos e ações."
+    )
+
+    contatos = pd.DataFrame(
+        buscar_todos(
+            "follow_contatos",
+            ordem="data_manutencao",
+            desc=True,
+        )
+    )
+
+    if contatos.empty:
+        st.info("Ainda não existem registros de Follow.")
+        st.stop()
+
+    linhas = []
+
+    for _, contato in contatos.iterrows():
+        follow_id = int(contato["id"])
+        resposta = carregar_resposta_mais_recente_follow(
+            follow_id
+        )
+
+        motivos = resposta.get("motivos") or []
+        os_afetadas = resposta.get("os_afetadas") or []
+
+        risco = classificar_risco_follow(
+            contato.to_dict(),
+            resposta,
+        )
+
+        linhas.append(
+            {
+                "Follow ID": follow_id,
+                "Data manutenção": texto_limpo(
+                    contato.get("data_manutencao")
+                ),
+                "Consultor": texto_limpo(
+                    contato.get("consultor")
+                ),
+                "Oficina": texto_limpo(
+                    contato.get("oficina")
+                ),
+                "Qtd agendadas": int(
+                    contato.get("qtd_agendadas") or 0
+                ),
+                "Status Follow": texto_limpo(
+                    contato.get("status")
+                ) or "Preparado",
+                "Respondido em": texto_limpo(
+                    contato.get("respondido_em")
+                ),
+                "Tem impedimento": bool(
+                    contato.get("tem_impedimento")
+                )
+                if contato.get("respondido_em")
+                else False,
+                "Risco": risco,
+                "Motivos": " | ".join(
+                    str(v) for v in motivos
+                ),
+                "OS afetadas": " | ".join(
+                    str(v) for v in os_afetadas
+                ),
+                "Observação oficina": texto_limpo(
+                    resposta.get("observacao")
+                ),
+                "Previsão oficina": texto_limpo(
+                    resposta.get("previsao_solucao")
+                ),
+                "Status ação": texto_limpo(
+                    contato.get("status_acao")
+                ) or "Não iniciado",
+                "Responsável ação": texto_limpo(
+                    contato.get("responsavel_acao")
+                ),
+                "Ação tomada": texto_limpo(
+                    contato.get("acao_tomada")
+                ),
+                "Prazo ação": texto_limpo(
+                    contato.get("prazo_acao")
+                ),
+                "Observação ação": texto_limpo(
+                    contato.get("observacao_acao")
+                ),
+            }
+        )
+
+    painel = pd.DataFrame(linhas)
+
+    # -----------------------------
+    # FILTROS
+    # -----------------------------
+    st.markdown("### Filtros")
+
+    datas_validas = pd.to_datetime(
+        painel["Data manutenção"],
+        errors="coerce",
+    ).dropna()
+
+    min_data = datas_validas.min().date()
+    max_data = datas_validas.max().date()
+
+    f1, f2, f3, f4 = st.columns(4)
+
+    with f1:
+        periodo = st.date_input(
+            "Período",
+            value=(min_data, max_data),
+            min_value=min_data,
+            max_value=max_data,
+            key="acao_follow_periodo",
+        )
+
+    with f2:
+        consultores = sorted(
+            {
+                v for v in painel["Consultor"]
+                if texto_limpo(v)
+            }
+        )
+        filtro_consultor = st.multiselect(
+            "Consultor",
+            consultores,
+            key="acao_follow_consultor",
+        )
+
+    with f3:
+        filtro_risco = st.multiselect(
+            "Risco",
+            ["Alto", "Médio", "Baixo", "Sem resposta"],
+            key="acao_follow_risco",
+        )
+
+    with f4:
+        filtro_status_acao = st.multiselect(
+            "Status da ação",
+            [
+                "Não iniciado",
+                "Em andamento",
+                "Aguardando oficina",
+                "Aguardando cliente",
+                "Concluído",
+            ],
+            key="acao_follow_status",
+        )
+
+    if isinstance(periodo, (list, tuple)) and len(periodo) == 2:
+        inicio, fim = periodo
+    else:
+        inicio = fim = (
+            periodo[0]
+            if isinstance(periodo, (list, tuple))
+            else periodo
+        )
+
+    data_series = pd.to_datetime(
+        painel["Data manutenção"],
+        errors="coerce",
+    ).dt.date
+
+    filtrado = painel[
+        (data_series >= inicio)
+        & (data_series <= fim)
+    ].copy()
+
+    if filtro_consultor:
+        filtrado = filtrado[
+            filtrado["Consultor"].isin(
+                filtro_consultor
+            )
+        ]
+
+    if filtro_risco:
+        filtrado = filtrado[
+            filtrado["Risco"].isin(
+                filtro_risco
+            )
+        ]
+
+    if filtro_status_acao:
+        filtrado = filtrado[
+            filtrado["Status ação"].isin(
+                filtro_status_acao
+            )
+        ]
+
+    if filtrado.empty:
+        st.info("Nenhum registro encontrado com esses filtros.")
+        st.stop()
+
+    exibir_cards_follow_acao(filtrado)
+
+    st.divider()
+
+    # -----------------------------
+    # PLACAR DE RISCO
+    # -----------------------------
+    st.markdown("### Placar de risco")
+
+    risco_resumo = (
+        filtrado["Risco"]
+        .value_counts()
+        .rename_axis("Risco")
+        .reset_index(name="Quantidade")
+    )
+
+    grafico_risco = px.bar(
+        risco_resumo,
+        x="Risco",
+        y="Quantidade",
+        text="Quantidade",
+    )
+    grafico_risco.update_layout(
+        showlegend=False,
+        height=360,
+    )
+    st.plotly_chart(
+        grafico_risco,
+        use_container_width=True,
+    )
+
+    st.divider()
+
+    # -----------------------------
+    # IMPEDIMENTOS
+    # -----------------------------
+    st.markdown("### Principais impedimentos informados")
+
+    impedimentos = filtrado[
+        filtrado["Motivos"].apply(
+            lambda x: bool(texto_limpo(x))
+        )
+    ].copy()
+
+    if impedimentos.empty:
+        st.info(
+            "Nenhum impedimento detalhado no período selecionado."
+        )
+    else:
+        motivos_explodidos = []
+
+        for _, linha in impedimentos.iterrows():
+            for motivo in str(linha["Motivos"]).split(" | "):
+                motivo = texto_limpo(motivo)
+                if motivo:
+                    motivos_explodidos.append(
+                        {
+                            "Motivo": motivo,
+                            "Consultor": linha["Consultor"],
+                            "Oficina": linha["Oficina"],
+                        }
+                    )
+
+        df_motivos = pd.DataFrame(
+            motivos_explodidos
+        )
+
+        ranking_motivos = (
+            df_motivos["Motivo"]
+            .value_counts()
+            .rename_axis("Motivo")
+            .reset_index(name="Quantidade")
+        )
+
+        grafico_motivos = px.bar(
+            ranking_motivos,
+            x="Quantidade",
+            y="Motivo",
+            orientation="h",
+            text="Quantidade",
+        )
+        grafico_motivos.update_layout(
+            height=max(
+                380,
+                48 * len(ranking_motivos),
+            ),
+            yaxis={
+                "categoryorder": "total ascending"
+            },
+        )
+        st.plotly_chart(
+            grafico_motivos,
+            use_container_width=True,
+        )
+
+    st.divider()
+
+    # -----------------------------
+    # FILA DE AÇÃO
+    # -----------------------------
+    st.markdown("### Fila de ação")
+    st.caption(
+        "Priorize os registros de risco alto, impedimentos e ausência de resposta."
+    )
+
+    prioridade_ordem = {
+        "Alto": 1,
+        "Sem resposta": 2,
+        "Médio": 3,
+        "Baixo": 4,
+    }
+
+    fila = filtrado.copy()
+    fila["__prioridade"] = fila["Risco"].map(
+        prioridade_ordem
+    ).fillna(99)
+
+    fila = fila.sort_values(
+        ["__prioridade", "Data manutenção", "Oficina"]
+    )
+
+    tabela_fila = fila[
+        [
+            "Follow ID",
+            "Data manutenção",
+            "Consultor",
+            "Oficina",
+            "Qtd agendadas",
+            "Risco",
+            "Motivos",
+            "OS afetadas",
+            "Status ação",
+            "Responsável ação",
+            "Prazo ação",
+        ]
+    ].copy()
+
+    st.dataframe(
+        tabela_fila,
+        use_container_width=True,
+        hide_index=True,
+        height=430,
+    )
+
+    st.divider()
+
+    # -----------------------------
+    # AÇÃO SOBRE UM FOLLOW
+    # -----------------------------
+    st.markdown("### Registrar / atualizar ação")
+
+    opcoes = [
+        (
+            int(row["Follow ID"]),
+            (
+                f"{row['Data manutenção']} · "
+                f"{row['Oficina']} · "
+                f"{row['Risco']}"
+            ),
+        )
+        for _, row in fila.iterrows()
+    ]
+
+    mapa_opcoes = {
+        label: follow_id
+        for follow_id, label in opcoes
+    }
+
+    selecionado_label = st.selectbox(
+        "Selecione um registro",
+        list(mapa_opcoes.keys()),
+        key="acao_follow_registro",
+    )
+
+    follow_id_sel = mapa_opcoes[
+        selecionado_label
+    ]
+
+    atual = fila[
+        fila["Follow ID"] == follow_id_sel
+    ].iloc[0]
+
+    with st.container(border=True):
+        st.markdown(
+            f"#### {atual['Oficina']} — {atual['Risco']}"
+        )
+        st.write(
+            f"**Data:** {atual['Data manutenção']}  \n"
+            f"**Consultor:** {atual['Consultor']}  \n"
+            f"**Motivos:** {atual['Motivos'] or 'Não informado'}  \n"
+            f"**OS afetadas:** {atual['OS afetadas'] or 'Não informado'}  \n"
+            f"**Observação da oficina:** "
+            f"{atual['Observação oficina'] or 'Não informada'}"
+        )
+
+        a1, a2 = st.columns(2)
+
+        with a1:
+            status_acao = st.selectbox(
+                "Status da ação",
+                [
+                    "Não iniciado",
+                    "Em andamento",
+                    "Aguardando oficina",
+                    "Aguardando cliente",
+                    "Concluído",
+                ],
+                index=[
+                    "Não iniciado",
+                    "Em andamento",
+                    "Aguardando oficina",
+                    "Aguardando cliente",
+                    "Concluído",
+                ].index(
+                    atual["Status ação"]
+                    if atual["Status ação"]
+                    in [
+                        "Não iniciado",
+                        "Em andamento",
+                        "Aguardando oficina",
+                        "Aguardando cliente",
+                        "Concluído",
+                    ]
+                    else "Não iniciado"
+                ),
+                key="acao_follow_status_edicao",
+            )
+
+            responsavel = st.text_input(
+                "Responsável pela ação",
+                value=atual["Responsável ação"],
+                key="acao_follow_responsavel",
+            )
+
+        with a2:
+            prazo = st.date_input(
+                "Prazo da ação",
+                value=(
+                    pd.to_datetime(
+                        atual["Prazo ação"],
+                        errors="coerce",
+                    ).date()
+                    if texto_limpo(
+                        atual["Prazo ação"]
+                    )
+                    else pd.to_datetime(
+                        atual["Data manutenção"]
+                    ).date()
+                ),
+                key="acao_follow_prazo",
+            )
+
+            acao_tomada = st.text_area(
+                "Ação / encaminhamento",
+                value=atual["Ação tomada"],
+                key="acao_follow_acao",
+            )
+
+        observacao_acao = st.text_area(
+            "Observação interna",
+            value=atual["Observação ação"],
+            key="acao_follow_obs",
+        )
+
+        if st.button(
+            "💾 Salvar ação",
+            type="primary",
+            use_container_width=True,
+        ):
+            atualizar_acao_follow(
+                follow_id=follow_id_sel,
+                status_acao=status_acao,
+                responsavel_acao=responsavel,
+                acao_tomada=acao_tomada,
+                prazo_acao=prazo.isoformat(),
+                observacao_acao=observacao_acao,
+            )
+            st.success("Ação atualizada.")
+            st.rerun()
+
+    st.divider()
+
+    # -----------------------------
+    # EXPORTAÇÃO
+    # -----------------------------
+    st.download_button(
+        "⬇️ Baixar placar do Follow em Excel",
+        data=dataframe_para_excel(
+            filtrado.drop(
+                columns=["__prioridade"],
+                errors="ignore",
+            ),
+            "Follow_Acoes",
+        ),
+        file_name="follow_acoes.xlsx",
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        use_container_width=True,
+    )
+
 
 elif pagina == "📞 Follow":
     exigir_supabase()
