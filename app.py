@@ -24,6 +24,10 @@ st.set_page_config(
     layout="wide",
 )
 
+
+# Cache global — precisa existir antes dos decorators
+CACHE_TTL_SEGUNDOS = 60
+
 CONSULTORES = [
     "Não definido",
     "Oscar Barbosa",
@@ -3265,7 +3269,6 @@ if exibir_formulario_publico_follow():
 # PERFORMANCE E ESTADO DA INTERFACE
 # =========================================================
 
-CACHE_TTL_SEGUNDOS = 60
 
 
 def invalidar_cache_dados() -> None:
@@ -3438,7 +3441,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.3.0 — Performance, filtros persistentes e navegação enxuta"
+        "Versão 2.3.1 — Correção de inicialização do cache"
     )
 
 
