@@ -635,6 +635,15 @@ def conciliar_bases(
     if "Status da Atividade" not in planejado.columns:
         planejado["Status da Atividade"] = ""
 
+    # Compatibilidade com todo o histórico já salvo:
+    # se uma importação antiga não tiver estes campos, o painel continua
+    # funcionando e exibe o detalhe como vazio, sem alterar os indicadores.
+    if "Razão da Improdutiva" not in resultado.columns:
+        resultado["Razão da Improdutiva"] = ""
+
+    if "Observação do Técnico (Improdutiva)" not in resultado.columns:
+        resultado["Observação do Técnico (Improdutiva)"] = ""
+
     if "__Ativa no Planejamento" not in planejado.columns:
         planejado["__Ativa no Planejamento"] = True
 
@@ -653,6 +662,14 @@ def conciliar_bases(
             OS_resultado=("OS", juntar_unicos),
             Oficina_resultado=("Oficina", "first"),
             Status_resultado=("Status da Atividade", juntar_unicos),
+            Razao_improdutiva=(
+                "Razão da Improdutiva",
+                juntar_unicos,
+            ),
+            Observacao_tecnico_improdutiva=(
+                "Observação do Técnico (Improdutiva)",
+                juntar_unicos,
+            ),
             Qtd_resultado=("Chave Atendimento", "size"),
         )
         .reset_index()
@@ -1885,6 +1902,8 @@ def exibir_detalhamento(
         "Data_operacional_planejada",
         "Status_planejado",
         "Status_resultado",
+        "Razao_improdutiva",
+        "Observacao_tecnico_improdutiva",
         "Motivo da Classificação",
         "Qtd_planejada",
         "Qtd_resultado",
@@ -1895,8 +1914,19 @@ def exibir_detalhamento(
         if coluna in detalhe.columns
     ]
 
+    detalhe_exibicao = detalhe[colunas].copy()
+
+    detalhe_exibicao = detalhe_exibicao.rename(
+        columns={
+            "Razao_improdutiva": "Razão da Improdutiva",
+            "Observacao_tecnico_improdutiva": (
+                "Observação do Técnico (Improdutiva)"
+            ),
+        }
+    )
+
     st.dataframe(
-        detalhe[colunas],
+        detalhe_exibicao,
         use_container_width=True,
         hide_index=True,
         height=480,
@@ -2696,7 +2726,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.2.5 — Auditoria de No-show por Ticket + placa"
+        "Versão 2.2.6 — Motivos OFS no detalhamento de improdutivas"
     )
 
 
