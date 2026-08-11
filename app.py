@@ -2721,12 +2721,13 @@ with st.sidebar:
             "🏢 Cadastro de Oficinas",
             "🏆 Ranking por Consultor",
             "📞 Follow",
+            "📉 Dashboard de Improdutividade",
         ],
     )
 
     st.divider()
     st.caption(
-        "Versão 2.2.6 — Motivos OFS no detalhamento de improdutivas"
+        "Versão 2.2.7 — Dashboard analítico de improdutividade"
     )
 
 
@@ -3575,6 +3576,472 @@ elif pagina == "🏆 Ranking por Consultor":
         ranking,
         use_container_width=True,
         hide_index=True,
+    )
+
+
+# =========================================================
+# FOLLOW
+# =========================================================
+
+elif pagina == "📉 Dashboard de Improdutividade":
+    exigir_supabase()
+
+    st.subheader("📉 Dashboard de Improdutividade")
+    st.caption(
+        "Análise histórica das manutenções não concluídas, separando "
+        "improdutivas agendadas e extras com os motivos registrados no OFS."
+    )
+
+    bases = listar_bases()
+
+    if bases.empty:
+        st.warning("Não existem bases salvas para análise.")
+        st.stop()
+
+    datas_planejado = set(
+        bases.loc[
+            bases["tipo"] == "planejado",
+            "data_operacional",
+        ].astype(str)
+    )
+    datas_resultado = set(
+        bases.loc[
+            bases["tipo"] == "resultado",
+            "data_operacional",
+        ].astype(str)
+    )
+
+    datas_completas = sorted(
+        datas_planejado & datas_resultado
+    )
+
+    if not datas_completas:
+        st.warning(
+            "Não existe período com planejado e resultado salvos juntos."
+        )
+        st.stop()
+
+    cadastro = carregar_oficinas()
+    consolidado = carregar_consolidado(datas_completas)
+
+    if consolidado.empty:
+        st.warning("Não foi possível montar o histórico.")
+        st.stop()
+
+    if not cadastro.empty:
+        base = enriquecer_com_cadastro(
+            consolidado,
+            cadastro,
+        )
+    else:
+        base = consolidado.copy()
+
+    improdutivas = base[
+        base["Classificação"].isin(
+            [
+                "Improdutiva agendada",
+                "Improdutiva extra",
+            ]
+        )
+    ].copy()
+
+    if improdutivas.empty:
+        st.info("Não existem improdutivas no período armazenado.")
+        st.stop()
+
+    # -----------------------------
+    # FILTROS
+    # -----------------------------
+    st.markdown("### Filtros")
+
+    f1, f2 = st.columns(2)
+
+    data_min = pd.to_datetime(
+        min(datas_completas)
+    ).date()
+    data_max = pd.to_datetime(
+        max(datas_completas)
+    ).date()
+
+    with f1:
+        periodo = st.date_input(
+            "Período",
+            value=(data_min, data_max),
+            min_value=data_min,
+            max_value=data_max,
+            key="imp_periodo",
+        )
+
+    with f2:
+        tipo = st.multiselect(
+            "Tipo de improdutiva",
+            [
+                "Improdutiva agendada",
+                "Improdutiva extra",
+            ],
+            default=[
+                "Improdutiva agendada",
+                "Improdutiva extra",
+            ],
+            key="imp_tipo",
+        )
+
+    if isinstance(periodo, (list, tuple)) and len(periodo) == 2:
+        inicio, fim = periodo
+    else:
+        inicio = fim = (
+            periodo[0]
+            if isinstance(periodo, (list, tuple))
+            else periodo
+        )
+
+    datas_base = pd.to_datetime(
+        improdutivas["Data Operacional"],
+        errors="coerce",
+    ).dt.date
+
+    filtrada = improdutivas[
+        (datas_base >= inicio)
+        & (datas_base <= fim)
+    ].copy()
+
+    if tipo:
+        filtrada = filtrada[
+            filtrada["Classificação"].isin(tipo)
+        ].copy()
+
+    consultores = sorted(
+        {
+            texto_limpo(v)
+            for v in filtrada.get(
+                "Consultor",
+                pd.Series(dtype=str),
+            )
+            if texto_limpo(v)
+        }
+    )
+
+    oficinas = sorted(
+        {
+            texto_limpo(v)
+            for v in filtrada.get(
+                "Oficina",
+                pd.Series(dtype=str),
+            )
+            if texto_limpo(v)
+        }
+    )
+
+    f3, f4 = st.columns(2)
+
+    with f3:
+        consultor_filtro = st.multiselect(
+            "Consultor",
+            consultores,
+            key="imp_consultor",
+        )
+
+    with f4:
+        oficina_filtro = st.multiselect(
+            "Oficina",
+            oficinas,
+            key="imp_oficina",
+        )
+
+    if consultor_filtro:
+        filtrada = filtrada[
+            filtrada["Consultor"].isin(
+                consultor_filtro
+            )
+        ].copy()
+
+    if oficina_filtro:
+        filtrada = filtrada[
+            filtrada["Oficina"].isin(
+                oficina_filtro
+            )
+        ].copy()
+
+    if filtrada.empty:
+        st.info("Nenhuma improdutiva encontrada com esses filtros.")
+        st.stop()
+
+    # -----------------------------
+    # INDICADORES
+    # -----------------------------
+    total = len(filtrada)
+    agendadas = int(
+        (
+            filtrada["Classificação"]
+            == "Improdutiva agendada"
+        ).sum()
+    )
+    extras = int(
+        (
+            filtrada["Classificação"]
+            == "Improdutiva extra"
+        ).sum()
+    )
+
+    motivos_validos = filtrada[
+        "Razao_improdutiva"
+    ].apply(texto_limpo)
+
+    com_motivo = int(
+        (motivos_validos != "").sum()
+    )
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Improdutivas totais", total)
+    k2.metric("Agendadas", agendadas)
+    k3.metric("Extras", extras)
+    k4.metric(
+        "% Agendadas",
+        f"{(agendadas / total * 100):.1f}%",
+    )
+    k5.metric(
+        "% com motivo OFS",
+        f"{(com_motivo / total * 100):.1f}%",
+    )
+
+    st.divider()
+
+    # -----------------------------
+    # PRINCIPAIS MOTIVOS
+    # -----------------------------
+    st.markdown("### Principais motivos de improdutividade")
+
+    analise = filtrada.copy()
+    analise["Motivo OFS"] = analise[
+        "Razao_improdutiva"
+    ].apply(
+        lambda v: texto_limpo(v) or "Motivo não informado"
+    )
+
+    ranking = (
+        analise
+        .groupby(
+            ["Motivo OFS", "Classificação"],
+            dropna=False,
+        )
+        .size()
+        .reset_index(name="Quantidade")
+    )
+
+    tabela_motivos = (
+        ranking
+        .pivot_table(
+            index="Motivo OFS",
+            columns="Classificação",
+            values="Quantidade",
+            aggfunc="sum",
+            fill_value=0,
+        )
+        .reset_index()
+    )
+
+    for coluna in [
+        "Improdutiva agendada",
+        "Improdutiva extra",
+    ]:
+        if coluna not in tabela_motivos.columns:
+            tabela_motivos[coluna] = 0
+
+    tabela_motivos["Total"] = (
+        tabela_motivos["Improdutiva agendada"]
+        + tabela_motivos["Improdutiva extra"]
+    )
+    tabela_motivos["% do total"] = (
+        tabela_motivos["Total"]
+        / total
+        * 100
+    ).round(1)
+
+    tabela_motivos = tabela_motivos.sort_values(
+        "Total",
+        ascending=False,
+    )
+
+    esquerda, direita = st.columns([1.25, 1])
+
+    with esquerda:
+        grafico_motivos = px.bar(
+            ranking,
+            x="Quantidade",
+            y="Motivo OFS",
+            color="Classificação",
+            orientation="h",
+            barmode="stack",
+            text="Quantidade",
+            title="Agendadas x Extras por motivo",
+        )
+        grafico_motivos.update_layout(
+            height=max(
+                430,
+                55 * ranking["Motivo OFS"].nunique(),
+            ),
+            yaxis={
+                "categoryorder": "total ascending"
+            },
+        )
+        st.plotly_chart(
+            grafico_motivos,
+            use_container_width=True,
+        )
+
+    with direita:
+        st.dataframe(
+            tabela_motivos.rename(
+                columns={
+                    "Improdutiva agendada": "Agendadas",
+                    "Improdutiva extra": "Extras",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+            height=430,
+        )
+
+    # -----------------------------
+    # EVOLUÇÃO POR DATA
+    # -----------------------------
+    st.divider()
+    st.markdown("### Evolução das improdutivas")
+
+    evolucao = (
+        analise
+        .groupby(
+            ["Data Operacional", "Classificação"],
+            dropna=False,
+        )
+        .size()
+        .reset_index(name="Quantidade")
+    )
+
+    evolucao["Data Operacional"] = pd.to_datetime(
+        evolucao["Data Operacional"],
+        errors="coerce",
+    )
+
+    grafico_evolucao = px.bar(
+        evolucao,
+        x="Data Operacional",
+        y="Quantidade",
+        color="Classificação",
+        barmode="group",
+        text="Quantidade",
+    )
+    grafico_evolucao.update_layout(
+        height=420,
+    )
+    st.plotly_chart(
+        grafico_evolucao,
+        use_container_width=True,
+    )
+
+    # -----------------------------
+    # OFICINAS
+    # -----------------------------
+    st.divider()
+    st.markdown("### Oficinas com mais improdutivas")
+
+    ranking_oficinas = (
+        analise
+        .groupby(
+            ["Oficina", "Classificação"],
+            dropna=False,
+        )
+        .size()
+        .reset_index(name="Quantidade")
+    )
+
+    grafico_oficinas = px.bar(
+        ranking_oficinas,
+        x="Quantidade",
+        y="Oficina",
+        color="Classificação",
+        orientation="h",
+        barmode="stack",
+        text="Quantidade",
+    )
+    grafico_oficinas.update_layout(
+        height=max(
+            430,
+            min(
+                900,
+                45 * ranking_oficinas["Oficina"].nunique(),
+            ),
+        ),
+        yaxis={
+            "categoryorder": "total ascending"
+        },
+    )
+    st.plotly_chart(
+        grafico_oficinas,
+        use_container_width=True,
+    )
+
+    # -----------------------------
+    # DETALHAMENTO
+    # -----------------------------
+    st.divider()
+    st.markdown("### Detalhamento das OS improdutivas")
+    st.caption(
+        "Os motivos e as observações abaixo são apresentados "
+        "como registrados no OFS."
+    )
+
+    colunas_detalhe = [
+        "Data Operacional",
+        "Classificação",
+        "OS_resultado",
+        "Ticket",
+        "Placa",
+        "Oficina",
+        "Consultor",
+        "Razao_improdutiva",
+        "Observacao_tecnico_improdutiva",
+    ]
+
+    colunas_detalhe = [
+        c
+        for c in colunas_detalhe
+        if c in analise.columns
+    ]
+
+    detalhe_imp = analise[
+        colunas_detalhe
+    ].copy()
+
+    detalhe_imp = detalhe_imp.rename(
+        columns={
+            "OS_resultado": "OS",
+            "Razao_improdutiva": "Razão da Improdutiva",
+            "Observacao_tecnico_improdutiva": (
+                "Observação do Técnico"
+            ),
+        }
+    )
+
+    st.dataframe(
+        detalhe_imp,
+        use_container_width=True,
+        hide_index=True,
+        height=520,
+    )
+
+    st.download_button(
+        "⬇️ Baixar análise de improdutivas em Excel",
+        data=dataframe_para_excel(
+            detalhe_imp,
+            "Improdutivas",
+        ),
+        file_name="analise_improdutivas.xlsx",
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        use_container_width=True,
     )
 
 
