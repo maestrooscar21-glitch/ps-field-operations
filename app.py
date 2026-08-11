@@ -1,4 +1,4 @@
-import html
+impotr html
 import io
 import re
 import unicodedata
@@ -3292,12 +3292,22 @@ def selectbox_persistente(
     if salvo not in opcoes:
         salvo = opcoes[0]
 
+    # Evita conflito entre `index=` e um valor já existente no session_state
+    # para a mesma key. O valor persistente é controlado apenas por memoria_key.
+    widget_key = f"widget::{key}"
+
+    if widget_key in st.session_state:
+        atual = st.session_state.get(widget_key)
+        if atual not in opcoes:
+            st.session_state[widget_key] = salvo
+    else:
+        st.session_state[widget_key] = salvo
+
     valor = st.selectbox(
         label,
         opcoes,
-        index=opcoes.index(salvo),
         format_func=format_func,
-        key=key,
+        key=widget_key,
     )
 
     st.session_state[memoria_key] = valor
@@ -3441,7 +3451,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.3.1 — Correção de inicialização do cache"
+        "Versão 2.3.2 — Correção de persistência dos filtros"
     )
 
 
@@ -5956,4 +5966,4 @@ elif pagina == "📞 Follow":
     exibir_respostas_follow(
         consultor,
         data_selecionada,
-    )
+    
