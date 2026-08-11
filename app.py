@@ -3303,11 +3303,20 @@ def selectbox_persistente(
     else:
         st.session_state[widget_key] = salvo
 
+    kwargs = {
+        "key": widget_key,
+    }
+
+    # O Streamlit espera uma função válida em format_func.
+    # Quando não houver formatação personalizada, simplesmente
+    # não enviamos esse argumento e deixamos o padrão do Streamlit.
+    if format_func is not None:
+        kwargs["format_func"] = format_func
+
     valor = st.selectbox(
         label,
         opcoes,
-        format_func=format_func,
-        key=widget_key,
+        **kwargs,
     )
 
     st.session_state[memoria_key] = valor
@@ -3451,7 +3460,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.3.2 — Correção de persistência dos filtros"
+        "Versão 2.3.3 — Correção do selectbox persistente"
     )
 
 
