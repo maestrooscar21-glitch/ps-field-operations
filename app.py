@@ -1464,6 +1464,7 @@ def salvar_planejamento_janela(
 
         resumo[data_operacional] = len(registros)
 
+    invalidar_cache_dados()
     return resumo
 
 
@@ -1516,6 +1517,8 @@ def salvar_base(
         }
     ).execute()
 
+    invalidar_cache_dados()
+
 
 def salvar_oficinas(cadastro: pd.DataFrame) -> None:
     cliente = exigir_supabase()
@@ -1554,7 +1557,10 @@ def salvar_oficinas(cadastro: pd.DataFrame) -> None:
             on_conflict="chave_oficina",
         ).execute()
 
+    invalidar_cache_dados()
 
+
+@st.cache_data(ttl=CACHE_TTL_SEGUNDOS, show_spinner=False)
 def carregar_oficinas() -> pd.DataFrame:
     registros = buscar_todos(
         "oficinas",
@@ -1580,6 +1586,7 @@ def carregar_oficinas() -> pd.DataFrame:
     )
 
 
+@st.cache_data(ttl=CACHE_TTL_SEGUNDOS, show_spinner=False)
 def carregar_base(
     tipo: str,
     data_operacional: str,
@@ -1650,6 +1657,7 @@ def carregar_base(
     return pd.DataFrame(linhas)
 
 
+@st.cache_data(ttl=CACHE_TTL_SEGUNDOS, show_spinner=False)
 def listar_bases() -> pd.DataFrame:
     registros = buscar_todos(
         "bases_importadas",
@@ -1676,7 +1684,10 @@ def excluir_base(tipo: str, data_operacional: str) -> None:
         data_operacional,
     ).execute()
 
+    invalidar_cache_dados()
 
+
+@st.cache_data(ttl=CACHE_TTL_SEGUNDOS, show_spinner=False)
 def carregar_consolidado(datas: list[str]) -> pd.DataFrame:
     """Concilia todas as datas completas e cria a visão histórica geral."""
     partes = []
@@ -2146,6 +2157,8 @@ def registrar_envio_follow(follow_id: int) -> None:
             "ultima_atualizacao": agora,
         }
     ).eq("id", follow_id).execute()
+
+    invalidar_cache_dados()
 
 
 def botao_whatsapp_web(
@@ -2711,6 +2724,8 @@ def atualizar_acao_follow(
         }
     ).eq("id", follow_id).execute()
 
+    invalidar_cache_dados()
+
 
 def carregar_resposta_mais_recente_follow(follow_id: int) -> dict:
     cliente = exigir_supabase()
@@ -3245,6 +3260,102 @@ if exibir_formulario_publico_follow():
     st.stop()
 
 
+
+# =========================================================
+# PERFORMANCE E ESTADO DA INTERFACE
+# =========================================================
+
+CACHE_TTL_SEGUNDOS = 60
+
+
+def invalidar_cache_dados() -> None:
+    st.cache_data.clear()
+
+
+def selectbox_persistente(
+    label: str,
+    options,
+    key: str,
+    format_func=None,
+):
+    opcoes = list(options)
+
+    if not opcoes:
+        return None
+
+    memoria_key = f"persist::{key}"
+    salvo = st.session_state.get(memoria_key)
+
+    if salvo not in opcoes:
+        salvo = opcoes[0]
+
+    valor = st.selectbox(
+        label,
+        opcoes,
+        index=opcoes.index(salvo),
+        format_func=format_func,
+        key=key,
+    )
+
+    st.session_state[memoria_key] = valor
+    return valor
+
+
+def multiselect_persistente(
+    label: str,
+    options,
+    key: str,
+    default=None,
+):
+    opcoes = list(options)
+    memoria_key = f"persist::{key}"
+    salvo = st.session_state.get(memoria_key)
+
+    if salvo is None:
+        salvo = list(default or [])
+
+    salvo = [
+        valor
+        for valor in salvo
+        if valor in opcoes
+    ]
+
+    valor = st.multiselect(
+        label,
+        opcoes,
+        default=salvo,
+        key=key,
+    )
+
+    st.session_state[memoria_key] = valor
+    return valor
+
+
+def date_input_persistente(
+    label: str,
+    value,
+    key: str,
+    min_value=None,
+    max_value=None,
+):
+    memoria_key = f"persist::{key}"
+    salvo = st.session_state.get(
+        memoria_key,
+        value,
+    )
+
+    valor = st.date_input(
+        label,
+        value=salvo,
+        min_value=min_value,
+        max_value=max_value,
+        key=key,
+    )
+
+    st.session_state[memoria_key] = valor
+    return valor
+
+
 # =========================================================
 # CABEÇALHO E MENU
 # =========================================================
@@ -3262,25 +3373,72 @@ st.divider()
 with st.sidebar:
     st.header("Navegação")
 
-    pagina = st.radio(
-        "Escolha uma tela",
+    area = st.radio(
+        "Área",
         [
-            "📊 Dashboard Executivo",
-            "👤 Painel do Consultor",
-            "📥 Importações",
-            "🗂 Bases Salvas",
-            "🏢 Cadastro de Oficinas",
-            "🏆 Ranking por Consultor",
+            "📊 Dashboard",
             "📞 Follow",
-            "📉 Dashboard de Improdutividade",
-            "🧭 Painel de Ações do Follow",
-            "🔄 Follow × Resultado OFS",
+            "📥 Dados",
+            "⚙️ Configurações",
         ],
+        key="nav_area_principal",
     )
+
+    if area == "📊 Dashboard":
+        subarea = st.radio(
+            "Visão",
+            [
+                "Executivo",
+                "Consultor",
+                "Improdutividade",
+            ],
+            key="nav_dashboard",
+        )
+
+        pagina = {
+            "Executivo": "📊 Dashboard Executivo",
+            "Consultor": "👤 Painel do Consultor",
+            "Improdutividade": "📉 Dashboard de Improdutividade",
+        }[subarea]
+
+    elif area == "📞 Follow":
+        subarea = st.radio(
+            "Etapa",
+            [
+                "Preventivo",
+                "Ações",
+                "Follow × OFS",
+            ],
+            key="nav_follow",
+        )
+
+        pagina = {
+            "Preventivo": "📞 Follow",
+            "Ações": "🧭 Painel de Ações do Follow",
+            "Follow × OFS": "🔄 Follow × Resultado OFS",
+        }[subarea]
+
+    elif area == "📥 Dados":
+        subarea = st.radio(
+            "Dados",
+            [
+                "Importações",
+                "Bases salvas",
+            ],
+            key="nav_dados",
+        )
+
+        pagina = {
+            "Importações": "📥 Importações",
+            "Bases salvas": "🗂 Bases Salvas",
+        }[subarea]
+
+    else:
+        pagina = "🏢 Cadastro de Oficinas"
 
     st.divider()
     st.caption(
-        "Versão 2.2.9 — Follow × Resultado OFS e análise de coerência"
+        "Versão 2.3.0 — Performance, filtros persistentes e navegação enxuta"
     )
 
 
@@ -3594,9 +3752,10 @@ elif pagina == "📊 Dashboard Executivo":
     st.divider()
     st.subheader("Visão por dia")
 
-    data_selecionada = st.selectbox(
+    data_selecionada = selectbox_persistente(
         "Data analisada",
         datas_completas,
+        key="dashboard_executivo_data",
         format_func=lambda valor: pd.to_datetime(valor).strftime(
             "%d/%m/%Y"
         ),
@@ -3750,7 +3909,7 @@ elif pagina == "👤 Painel do Consultor":
 
     st.subheader("Painel do Consultor")
 
-    consultor_selecionado = st.selectbox(
+    consultor_selecionado = selectbox_persistente(
         "Consultor",
         consultores_disponiveis,
         key="consultor_painel_dedicado",
@@ -3811,13 +3970,13 @@ elif pagina == "👤 Painel do Consultor":
     st.divider()
     st.subheader("Visão diária do consultor")
 
-    data_selecionada = st.selectbox(
+    data_selecionada = selectbox_persistente(
         "Data analisada",
         datas_completas,
+        key="data_painel_consultor",
         format_func=lambda valor: pd.to_datetime(valor).strftime(
             "%d/%m/%Y"
         ),
-        key="data_painel_consultor",
     )
 
     base_dia_consultor = base_consolidada_consultor[
@@ -4217,7 +4376,7 @@ elif pagina == "📉 Dashboard de Improdutividade":
     ).date()
 
     with f1:
-        periodo = st.date_input(
+        periodo = date_input_persistente(
             "Período",
             value=(data_min, data_max),
             min_value=data_min,
@@ -4226,7 +4385,7 @@ elif pagina == "📉 Dashboard de Improdutividade":
         )
 
     with f2:
-        tipo = st.multiselect(
+        tipo = multiselect_persistente(
             "Tipo de improdutiva",
             [
                 "Improdutiva agendada",
@@ -4288,14 +4447,14 @@ elif pagina == "📉 Dashboard de Improdutividade":
     f3, f4 = st.columns(2)
 
     with f3:
-        consultor_filtro = st.multiselect(
+        consultor_filtro = multiselect_persistente(
             "Consultor",
             consultores,
             key="imp_consultor",
         )
 
     with f4:
-        oficina_filtro = st.multiselect(
+        oficina_filtro = multiselect_persistente(
             "Oficina",
             oficinas,
             key="imp_oficina",
@@ -4691,7 +4850,7 @@ elif pagina == "🔄 Follow × Resultado OFS":
     f1, f2, f3 = st.columns(3)
 
     with f1:
-        periodo = st.date_input(
+        periodo = date_input_persistente(
             "Período",
             value=(min_data, max_data),
             min_value=min_data,
@@ -4707,7 +4866,7 @@ elif pagina == "🔄 Follow × Resultado OFS":
                 if texto_limpo(v)
             }
         )
-        consultor_filtro = st.multiselect(
+        consultor_filtro = multiselect_persistente(
             "Consultor",
             consultores,
             key="cruz_follow_consultor",
@@ -4719,7 +4878,7 @@ elif pagina == "🔄 Follow × Resultado OFS":
                 "Coerência Follow × Resultado"
             ].dropna().unique().tolist()
         )
-        coerencia_filtro = st.multiselect(
+        coerencia_filtro = multiselect_persistente(
             "Situação",
             tipos_coerencia,
             key="cruz_follow_coerencia",
@@ -5023,7 +5182,7 @@ elif pagina == "🧭 Painel de Ações do Follow":
     f1, f2, f3, f4 = st.columns(4)
 
     with f1:
-        periodo = st.date_input(
+        periodo = date_input_persistente(
             "Período",
             value=(min_data, max_data),
             min_value=min_data,
@@ -5038,21 +5197,21 @@ elif pagina == "🧭 Painel de Ações do Follow":
                 if texto_limpo(v)
             }
         )
-        filtro_consultor = st.multiselect(
+        filtro_consultor = multiselect_persistente(
             "Consultor",
             consultores,
             key="acao_follow_consultor",
         )
 
     with f3:
-        filtro_risco = st.multiselect(
+        filtro_risco = multiselect_persistente(
             "Risco",
             ["Alto", "Médio", "Baixo", "Sem resposta"],
             key="acao_follow_risco",
         )
 
     with f4:
-        filtro_status_acao = st.multiselect(
+        filtro_status_acao = multiselect_persistente(
             "Status da ação",
             [
                 "Não iniciado",
@@ -5433,9 +5592,10 @@ elif pagina == "📞 Follow":
         "registre os contatos e acompanhe impedimentos."
     )
 
-    data_selecionada = st.selectbox(
+    data_selecionada = selectbox_persistente(
         "Data das manutenções",
         datas,
+        key="follow_preventivo_data",
         format_func=lambda valor: pd.to_datetime(valor).strftime(
             "%d/%m/%Y"
         ),
@@ -5485,9 +5645,10 @@ elif pagina == "📞 Follow":
         )
         st.stop()
 
-    consultor = st.selectbox(
+    consultor = selectbox_persistente(
         "Consultor",
         consultores,
+        key="follow_preventivo_consultor",
     )
 
     base_consultor_todas = base_todas[
