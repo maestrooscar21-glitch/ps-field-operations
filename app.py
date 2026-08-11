@@ -1,4 +1,4 @@
-impotr html
+import html
 import io
 import re
 import unicodedata
@@ -5966,4 +5966,5 @@ elif pagina == "📞 Follow":
     exibir_respostas_follow(
         consultor,
         data_selecionada,
-    
+    )
+
