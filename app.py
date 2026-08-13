@@ -1929,6 +1929,21 @@ def categorizar_texto_improdutiva(texto) -> set[str]:
             "MAO DE OBRA",
             "INDISPONIBILIDADE DO TECNICO",
         ],
+        "Deslocamento / veículo do técnico": [
+            "MEU VEICULO",
+            "MEU CARRO",
+            "MEU CAMINHAO",
+            "NO MEIO DO CAMINHO",
+            "NO CAMINHO",
+            "A CAMINHO",
+            "TIVE QUE REBOCAR",
+            "GUINCHO",
+            "PNEU FURADO",
+            "PROBLEMA NO MEU VEICULO",
+            "PROBLEMA COM MEU VEICULO",
+            "PROBLEMA NO MEU CARRO",
+            "PROBLEMA COM MEU CARRO",
+        ],
         "Sinistro": [
             "SINISTRO",
             "ACIDENTE",
@@ -2062,12 +2077,52 @@ def analisar_qualidade_apontamento(
             "",
         )
 
+    # Regra contextual prioritária:
+    # expressões em primeira pessoa indicam problema do técnico/deslocamento,
+    # e não indisponibilidade do veículo do cliente.
+    sinais_veiculo_tecnico = [
+        "MEU VEICULO",
+        "MEU CARRO",
+        "MEU CAMINHAO",
+        "PROBLEMA NO MEU VEICULO",
+        "PROBLEMA COM MEU VEICULO",
+        "PROBLEMA NO MEU CARRO",
+        "PROBLEMA COM MEU CARRO",
+        "NO MEIO DO CAMINHO",
+        "TIVE QUE REBOCAR",
+        "A CAMINHO",
+        "GUINCHO",
+        "PNEU FURADO",
+    ]
+
+    contexto_veiculo_tecnico = any(
+        termo in obs_norm
+        for termo in sinais_veiculo_tecnico
+    )
+
     cat_motivo = categorizar_razao_ofs(
         motivo
     )
     cat_obs = categorizar_texto_improdutiva(
         obs
     )
+
+    if contexto_veiculo_tecnico:
+        # Remove uma possível classificação genérica causada apenas
+        # pelas palavras "veículo/carro".
+        cat_obs.discard("Veículo indisponível")
+        cat_obs.add("Deslocamento / veículo do técnico")
+
+        if "Deslocamento / veículo do técnico" not in cat_motivo:
+            return (
+                "🔴 Divergente",
+                (
+                    "A observação indica problema no deslocamento ou no "
+                    "veículo do próprio técnico, e não indisponibilidade "
+                    "do veículo do cliente."
+                ),
+                "Deslocamento / veículo do técnico",
+            )
 
     if not cat_obs:
         return (
@@ -4021,7 +4076,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.4.0 — Auditoria de qualidade e conformidade das improdutivas"
+        "Versão 2.4.1 — Auditoria contextual das improdutivas"
     )
 
 
