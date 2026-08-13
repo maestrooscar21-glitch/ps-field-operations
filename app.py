@@ -4076,7 +4076,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.4.2 — Visão semanal de MCI e MD"
+        "Versão 2.4.3 — MCI e MD semanal no Painel do Consultor"
     )
 
 
@@ -4797,6 +4797,227 @@ elif pagina == "👤 Painel do Consultor":
             f"Consolidado de {consultor_selecionado} — {regiao}"
         ),
     )
+
+    # =====================================================
+    # VISÃO SEMANAL DO CONSULTOR — MCI E MD
+    # =====================================================
+
+    st.divider()
+    st.subheader("Visão semanal do consultor — MCI e MD")
+    st.caption(
+        "Semanas de segunda a domingo. "
+        "A semana atual considera apenas as datas completas já importadas."
+    )
+
+    semanal_consultor = base_consolidada_consultor.copy()
+    semanal_consultor["__Data_dt"] = pd.to_datetime(
+        semanal_consultor["Data Operacional"],
+        errors="coerce",
+    )
+
+    semanal_consultor = semanal_consultor[
+        semanal_consultor["__Data_dt"].notna()
+    ].copy()
+
+    if not semanal_consultor.empty:
+        semanal_consultor["__Inicio_semana"] = (
+            semanal_consultor["__Data_dt"]
+            - pd.to_timedelta(
+                semanal_consultor["__Data_dt"].dt.weekday,
+                unit="D",
+            )
+        ).dt.normalize()
+
+        blocos_semanais_consultor = []
+
+        for inicio_semana, grupo_semana in (
+            semanal_consultor.groupby("__Inicio_semana")
+        ):
+            fim_semana = (
+                inicio_semana
+                + pd.Timedelta(days=6)
+            )
+
+            indicadores_semana = calcular_indicadores(
+                grupo_semana
+            )
+
+            blocos_semanais_consultor.append(
+                {
+                    "Semana": (
+                        f"{inicio_semana.strftime('%d/%m')} "
+                        f"a {fim_semana.strftime('%d/%m')}"
+                    ),
+                    "Início": inicio_semana,
+                    "Fim": fim_semana,
+                    "Agendadas": indicadores_semana["Planejadas"],
+                    "Executadas agendadas": (
+                        indicadores_semana["Executadas planejadas"]
+                    ),
+                    "Executadas extras": (
+                        indicadores_semana["Executadas extras"]
+                    ),
+                    "Improdutivas": indicadores_semana["Improdutivas"],
+                    "No-show": indicadores_semana["No-show"],
+                    "Canceladas": indicadores_semana["Canceladas"],
+                    "MCI": indicadores_semana["MCI"],
+                    "MD": indicadores_semana["MD"],
+                    "Datas completas": int(
+                        grupo_semana[
+                            "Data Operacional"
+                        ].astype(str).nunique()
+                    ),
+                }
+            )
+
+        resumo_semanal_consultor = pd.DataFrame(
+            blocos_semanais_consultor
+        ).sort_values(
+            "Início",
+            ascending=False,
+        )
+
+        resumo_exibicao_consultor = (
+            resumo_semanal_consultor[
+                [
+                    "Semana",
+                    "Agendadas",
+                    "Executadas agendadas",
+                    "Executadas extras",
+                    "Improdutivas",
+                    "No-show",
+                    "Canceladas",
+                    "MCI",
+                    "MD",
+                    "Datas completas",
+                ]
+            ].copy()
+        )
+
+        resumo_exibicao_consultor["MCI"] = (
+            resumo_exibicao_consultor["MCI"]
+            .apply(lambda valor: f"{valor:.1f}%")
+        )
+        resumo_exibicao_consultor["MD"] = (
+            resumo_exibicao_consultor["MD"]
+            .apply(lambda valor: f"{valor:.1f}%")
+        )
+
+        st.dataframe(
+            resumo_exibicao_consultor,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        semanas_consultor = resumo_semanal_consultor[
+            "Semana"
+        ].tolist()
+
+        semana_consultor_sel = st.selectbox(
+            "Detalhar semana do consultor",
+            semanas_consultor,
+            key=(
+                "semana_consultor_mci_md_"
+                + normalizar_texto(
+                    consultor_selecionado
+                )
+            ),
+        )
+
+        linha_semana_consultor = (
+            resumo_semanal_consultor[
+                resumo_semanal_consultor["Semana"]
+                == semana_consultor_sel
+            ].iloc[0]
+        )
+
+        inicio_consultor_sel = (
+            linha_semana_consultor["Início"]
+        )
+        fim_consultor_sel = (
+            linha_semana_consultor["Fim"]
+        )
+
+        base_semana_consultor = semanal_consultor[
+            (
+                semanal_consultor["__Data_dt"]
+                >= inicio_consultor_sel
+            )
+            & (
+                semanal_consultor["__Data_dt"]
+                <= fim_consultor_sel
+            )
+        ].copy()
+
+        indicadores_semana_consultor = (
+            calcular_indicadores(
+                base_semana_consultor
+            )
+        )
+
+        sw1, sw2, sw3, sw4 = st.columns(4)
+        sw1.metric(
+            "MCI da semana",
+            f"{indicadores_semana_consultor['MCI']:.1f}%",
+        )
+        sw2.metric(
+            "MD da semana",
+            f"{indicadores_semana_consultor['MD']:.1f}%",
+        )
+        sw3.metric(
+            "Agendadas",
+            indicadores_semana_consultor["Planejadas"],
+        )
+        sw4.metric(
+            "Executadas agendadas",
+            indicadores_semana_consultor[
+                "Executadas planejadas"
+            ],
+        )
+
+        sw5, sw6, sw7, sw8 = st.columns(4)
+        sw5.metric(
+            "Improdutivas",
+            indicadores_semana_consultor["Improdutivas"],
+        )
+        sw6.metric(
+            "No-show",
+            indicadores_semana_consultor["No-show"],
+        )
+        sw7.metric(
+            "Canceladas",
+            indicadores_semana_consultor["Canceladas"],
+        )
+        sw8.metric(
+            "Execuções extras",
+            indicadores_semana_consultor["Executadas extras"],
+        )
+
+        exibir_detalhamento(
+            base_semana_consultor,
+            escopo=(
+                "semana_consultor_"
+                + normalizar_texto(
+                    consultor_selecionado
+                )
+                + "_"
+                + inicio_consultor_sel.strftime(
+                    "%Y_%m_%d"
+                )
+            ),
+            contexto=(
+                f"{consultor_selecionado} — {regiao} — "
+                "Semana "
+                f"{inicio_consultor_sel.strftime('%d/%m/%Y')} "
+                "a "
+                f"{fim_consultor_sel.strftime('%d/%m/%Y')}"
+            ),
+        )
+    else:
+        st.info(
+            "Não há dados suficientes para montar "
+            "a visão semanal deste consultor."
+        )
 
     # =====================================================
     # VISÃO DIÁRIA DO CONSULTOR
