@@ -648,6 +648,21 @@ def conciliar_bases(
     if "Observação do Técnico (Improdutiva)" not in resultado.columns:
         resultado["Observação do Técnico (Improdutiva)"] = ""
 
+    # Campos usados na auditoria de conformidade temporal das improdutivas.
+    for coluna_auditoria in [
+        "Intervalo de Tempo",
+        "Janela de Serviço",
+        "Janela de Serviço.1",
+        "Início",
+        "Fim",
+        "Duração",
+        "Recurso",
+        "Cliente",
+        "Cidade",
+    ]:
+        if coluna_auditoria not in resultado.columns:
+            resultado[coluna_auditoria] = ""
+
     if "__Ativa no Planejamento" not in planejado.columns:
         planejado["__Ativa no Planejamento"] = True
 
@@ -673,6 +688,42 @@ def conciliar_bases(
             Observacao_tecnico_improdutiva=(
                 "Observação do Técnico (Improdutiva)",
                 juntar_unicos,
+            ),
+            Intervalo_tempo=(
+                "Intervalo de Tempo",
+                "first",
+            ),
+            Janela_servico=(
+                "Janela de Serviço",
+                "first",
+            ),
+            Janela_servico_detalhada=(
+                "Janela de Serviço.1",
+                "first",
+            ),
+            Inicio_real=(
+                "Início",
+                "first",
+            ),
+            Fim_real=(
+                "Fim",
+                "first",
+            ),
+            Duracao_real=(
+                "Duração",
+                "first",
+            ),
+            Tecnico_recurso=(
+                "Recurso",
+                "first",
+            ),
+            Cliente_resultado=(
+                "Cliente",
+                "first",
+            ),
+            Cidade_resultado=(
+                "Cidade",
+                "first",
             ),
             Qtd_resultado=("Chave Atendimento", "size"),
         )
@@ -1722,6 +1773,516 @@ def carregar_consolidado(datas: list[str]) -> pd.DataFrame:
         ignore_index=True,
         sort=False,
     )
+
+
+
+# =========================================================
+# AUDITORIA DE QUALIDADE DAS IMPRODUTIVAS
+# =========================================================
+
+def minutos_hhmm(valor) -> int | None:
+    texto = texto_limpo(valor)
+
+    if not texto:
+        return None
+
+    encontrado = re.search(
+        r"(\d{1,2}):(\d{2})",
+        texto,
+    )
+
+    if not encontrado:
+        return None
+
+    hora = int(encontrado.group(1))
+    minuto = int(encontrado.group(2))
+
+    if hora > 23 or minuto > 59:
+        return None
+
+    return hora * 60 + minuto
+
+
+def minutos_duracao(valor) -> int | None:
+    texto = texto_limpo(valor)
+
+    if not texto:
+        return None
+
+    encontrado = re.search(
+        r"(\d{1,3}):(\d{2})",
+        texto,
+    )
+
+    if not encontrado:
+        return None
+
+    horas = int(encontrado.group(1))
+    minutos = int(encontrado.group(2))
+
+    return horas * 60 + minutos
+
+
+def janela_contratual_minutos(valor) -> tuple[int | None, int | None]:
+    """
+    Interpreta formatos do OFS como:
+    08 - 09
+    8 - 9
+    08:00 - 09:00
+    """
+    texto = texto_limpo(valor)
+
+    if not texto:
+        return None, None
+
+    horas = re.findall(
+        r"\b(\d{1,2})(?::(\d{2}))?\b",
+        texto,
+    )
+
+    if len(horas) < 2:
+        return None, None
+
+    def converter(par):
+        h = int(par[0])
+        m = int(par[1] or 0)
+
+        if h > 23 or m > 59:
+            return None
+
+        return h * 60 + m
+
+    inicio = converter(horas[0])
+    fim = converter(horas[1])
+
+    return inicio, fim
+
+
+def categorizar_texto_improdutiva(texto) -> set[str]:
+    normal = normalizar_texto(texto)
+
+    if not normal:
+        return set()
+
+    categorias = set()
+
+    regras = {
+        "Veículo indisponível": [
+            "VEICULO",
+            "CARRO",
+            "CAMINHAO",
+            "FROTA",
+            "EM ROTA",
+            "NAO ESTA NO LOCAL",
+            "NAO CHEGOU",
+            "INDISPONIVEL",
+        ],
+        "Equipamento / material": [
+            "EQUIPAMENTO",
+            "KIT",
+            "MATERIAL",
+            "PECA",
+            "FERRAMENTA",
+            "CHICOTE",
+            "CABO",
+            "INSUMO",
+        ],
+        "OS / cadastro / direcionamento": [
+            "OS ABERTA",
+            "OS ERRADA",
+            "OS INCORRETA",
+            "PROBLEMA NA OS",
+            "ITEM INCORRETO",
+            "CADASTRO",
+            "NAO E MINHA REGIAO",
+            "REGIAO",
+            "DIRECION",
+        ],
+        "Sistema / suporte": [
+            "VSERVICE",
+            "V SERVICES",
+            "SISTEMA",
+            "TRAVOU",
+            "SUPORTE",
+            "APLICATIVO",
+        ],
+        "Portaria / acesso": [
+            "PORTARIA",
+            "LIBERACAO",
+            "LIBERADO",
+            "SEGURANCA",
+            "ACESSO",
+        ],
+        "Cliente / agendamento": [
+            "CLIENTE NAO SABIA",
+            "NAO SABIA DO AGENDAMENTO",
+            "AGENDAMENTO",
+            "REAGENDAR",
+            "OUTRA DATA",
+            "CLIENTE SOLICITOU",
+            "CLIENTE INFORMOU",
+        ],
+        "Técnico / capacidade": [
+            "TECNICO",
+            "EQUIPE",
+            "CAPACIDADE",
+            "MAO DE OBRA",
+            "INDISPONIBILIDADE DO TECNICO",
+        ],
+        "Sinistro": [
+            "SINISTRO",
+            "ACIDENTE",
+            "COLISAO",
+        ],
+    }
+
+    for categoria, termos in regras.items():
+        if any(
+            termo in normal
+            for termo in termos
+        ):
+            categorias.add(categoria)
+
+    return categorias
+
+
+def categorizar_razao_ofs(valor) -> set[str]:
+    texto = normalizar_texto(valor)
+
+    if not texto:
+        return set()
+
+    categorias = set()
+
+    if any(
+        termo in texto
+        for termo in [
+            "CARRO INDISPONIVEL",
+            "VEICULO INDISPONIVEL",
+            "INDISPONIBILIDADE DO VEICULO",
+        ]
+    ):
+        categorias.add("Veículo indisponível")
+
+    if any(
+        termo in texto
+        for termo in [
+            "FALTA DE EQUIPAMENTO",
+            "EQUIPAMENTO",
+            "FERRAMENTA",
+            "MATERIAL",
+        ]
+    ):
+        categorias.add("Equipamento / material")
+
+    if any(
+        termo in texto
+        for termo in [
+            "SISTEMA",
+            "PROBLEMAS TECNICOS COM SISTEMAS",
+        ]
+    ):
+        categorias.add("Sistema / suporte")
+
+    if any(
+        termo in texto
+        for termo in [
+            "PROBLEMAS TECNICOS COM VEICULOS",
+            "PROBLEMA TECNICO COM VEICULO",
+        ]
+    ):
+        categorias.add("Veículo indisponível")
+
+    if any(
+        termo in texto
+        for termo in [
+            "PORTARIA",
+            "NAO LIBERADO",
+        ]
+    ):
+        categorias.add("Portaria / acesso")
+
+    if any(
+        termo in texto
+        for termo in [
+            "CLIENTE INFORMOU COM ANTECEDENCIA",
+            "CLIENTE SOLICITOU",
+        ]
+    ):
+        categorias.add("Cliente / agendamento")
+
+    if any(
+        termo in texto
+        for termo in [
+            "TECNICO",
+            "EQUIPE",
+            "CAPACIDADE",
+        ]
+    ):
+        categorias.add("Técnico / capacidade")
+
+    if "SINISTRO" in texto:
+        categorias.add("Sinistro")
+
+    return categorias
+
+
+def analisar_qualidade_apontamento(
+    motivo_ofs,
+    observacao,
+) -> tuple[str, str, str]:
+    motivo = texto_limpo(motivo_ofs)
+    obs = texto_limpo(observacao)
+
+    if not obs:
+        return (
+            "⚪ Sem informação",
+            "Observação técnica não preenchida.",
+            "",
+        )
+
+    obs_norm = normalizar_texto(obs)
+
+    justificativas_fracas = [
+        "SO PRA TIRAR DA AGENDA",
+        "SO PARA TIRAR DA AGENDA",
+        "RETIRAR DA AGENDA",
+        "TIRAR DA AGENDA",
+        "NAO FOI POSSIVEL",
+        "NAO DEU",
+    ]
+
+    if any(
+        termo in obs_norm
+        for termo in justificativas_fracas
+    ):
+        return (
+            "🟠 Justificativa insuficiente",
+            "O texto não descreve uma causa operacional suficiente.",
+            "",
+        )
+
+    cat_motivo = categorizar_razao_ofs(
+        motivo
+    )
+    cat_obs = categorizar_texto_improdutiva(
+        obs
+    )
+
+    if not cat_obs:
+        return (
+            "🟡 Revisar",
+            "A observação existe, mas a causa não pôde ser classificada com segurança.",
+            "",
+        )
+
+    if not cat_motivo:
+        sugerido = " / ".join(
+            sorted(cat_obs)
+        )
+        return (
+            "🟡 Revisar",
+            "O motivo OFS não foi reconhecido pelo motor de regras.",
+            sugerido,
+        )
+
+    intersecao = (
+        cat_motivo
+        & cat_obs
+    )
+
+    if intersecao:
+        return (
+            "🟢 Coerente",
+            "Motivo selecionado e observação apresentam causa compatível.",
+            "",
+        )
+
+    sugerido = " / ".join(
+        sorted(cat_obs)
+    )
+
+    return (
+        "🔴 Divergente",
+        "A observação aponta para uma causa diferente do motivo selecionado no OFS.",
+        sugerido,
+    )
+
+
+def analisar_conformidade_temporal(
+    intervalo,
+    inicio_real,
+    fim_real,
+    duracao,
+) -> tuple[str, str, str]:
+    janela_inicio, janela_fim = (
+        janela_contratual_minutos(
+            intervalo
+        )
+    )
+
+    inicio = minutos_hhmm(
+        inicio_real
+    )
+    fim = minutos_hhmm(
+        fim_real
+    )
+    duracao_min = minutos_duracao(
+        duracao
+    )
+
+    problemas = []
+
+    if (
+        janela_inicio is None
+        or janela_fim is None
+    ):
+        status_janela = "Janela não informada"
+    elif inicio is None:
+        status_janela = "Início não informado"
+        problemas.append(
+            "Sem horário de início para validar a janela."
+        )
+    elif (
+        inicio < janela_inicio
+        or inicio > janela_fim
+    ):
+        status_janela = "Fora da janela"
+        problemas.append(
+            "Início da improdutiva fora da janela contratada."
+        )
+    else:
+        status_janela = "Dentro da janela"
+
+    if duracao_min is None:
+        status_tempo = "Duração não informada"
+        problemas.append(
+            "Sem duração para validar os 30 minutos."
+        )
+    elif duracao_min < 30:
+        status_tempo = "Tempo inferior a 30 min"
+        problemas.append(
+            f"Duração registrada de {duracao_min} min, abaixo dos 30 min."
+        )
+    else:
+        status_tempo = "30 min ou mais"
+
+    if (
+        status_janela == "Dentro da janela"
+        and status_tempo == "30 min ou mais"
+    ):
+        return (
+            "🟢 Conforme",
+            (
+                "Início dentro da janela e tempo de improdutividade "
+                "igual ou superior a 30 minutos."
+            ),
+            "Elegível para análise de cobrança",
+        )
+
+    if (
+        status_janela in {
+            "Janela não informada",
+            "Início não informado",
+        }
+        or status_tempo == "Duração não informada"
+    ):
+        return (
+            "🟡 Revisar",
+            " ".join(problemas)
+            or "Não há informação suficiente para concluir.",
+            "Revisar evidências",
+        )
+
+    return (
+        "🔴 Risco de faturamento",
+        " ".join(problemas),
+        "Possivelmente não faturável",
+    )
+
+
+def enriquecer_auditoria_improdutivas(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    resultado = df.copy()
+
+    qualidade = resultado.apply(
+        lambda linha: analisar_qualidade_apontamento(
+            linha.get(
+                "Razao_improdutiva",
+                "",
+            ),
+            linha.get(
+                "Observacao_tecnico_improdutiva",
+                "",
+            ),
+        ),
+        axis=1,
+        result_type="expand",
+    )
+
+    qualidade.columns = [
+        "Qualidade apontamento",
+        "Leitura qualidade",
+        "Motivo sugerido",
+    ]
+
+    resultado = pd.concat(
+        [
+            resultado.reset_index(
+                drop=True
+            ),
+            qualidade.reset_index(
+                drop=True
+            ),
+        ],
+        axis=1,
+    )
+
+    temporal = resultado.apply(
+        lambda linha: analisar_conformidade_temporal(
+            linha.get(
+                "Intervalo_tempo",
+                "",
+            ),
+            linha.get(
+                "Inicio_real",
+                "",
+            ),
+            linha.get(
+                "Fim_real",
+                "",
+            ),
+            linha.get(
+                "Duracao_real",
+                "",
+            ),
+        ),
+        axis=1,
+        result_type="expand",
+    )
+
+    temporal.columns = [
+        "Conformidade temporal",
+        "Leitura temporal",
+        "Elegibilidade",
+    ]
+
+    resultado = pd.concat(
+        [
+            resultado.reset_index(
+                drop=True
+            ),
+            temporal.reset_index(
+                drop=True
+            ),
+        ],
+        axis=1,
+    )
+
+    return resultado
+
+
 
 
 # =========================================================
@@ -3460,7 +4021,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.3.3 — Correção do selectbox persistente"
+        "Versão 2.4.0 — Auditoria de qualidade e conformidade das improdutivas"
     )
 
 
@@ -4541,11 +5102,144 @@ elif pagina == "📉 Dashboard de Improdutividade":
     st.divider()
 
     # -----------------------------
-    # PRINCIPAIS MOTIVOS
+    # PRINCIPAIS MOTIVOS + AUDITORIA
     # -----------------------------
+    analise = enriquecer_auditoria_improdutivas(
+        filtrada
+    )
+
+    st.markdown("### Qualidade e conformidade dos apontamentos")
+
+    qualidade_contagem = (
+        analise["Qualidade apontamento"]
+        .value_counts()
+    )
+    temporal_contagem = (
+        analise["Conformidade temporal"]
+        .value_counts()
+    )
+
+    q_coerentes = int(
+        qualidade_contagem.get(
+            "🟢 Coerente",
+            0,
+        )
+    )
+    q_revisar = int(
+        qualidade_contagem.get(
+            "🟡 Revisar",
+            0,
+        )
+    )
+    q_divergentes = int(
+        qualidade_contagem.get(
+            "🔴 Divergente",
+            0,
+        )
+    )
+    q_insuf = int(
+        qualidade_contagem.get(
+            "🟠 Justificativa insuficiente",
+            0,
+        )
+    )
+    q_sem_info = int(
+        qualidade_contagem.get(
+            "⚪ Sem informação",
+            0,
+        )
+    )
+
+    t_conformes = int(
+        temporal_contagem.get(
+            "🟢 Conforme",
+            0,
+        )
+    )
+    t_revisar = int(
+        temporal_contagem.get(
+            "🟡 Revisar",
+            0,
+        )
+    )
+    t_risco = int(
+        temporal_contagem.get(
+            "🔴 Risco de faturamento",
+            0,
+        )
+    )
+
+    qc1, qc2, qc3, qc4, qc5 = st.columns(5)
+    qc1.metric("🟢 Coerentes", q_coerentes)
+    qc2.metric("🟡 Revisar texto", q_revisar)
+    qc3.metric("🔴 Divergentes", q_divergentes)
+    qc4.metric("🟠 Justificativa insuficiente", q_insuf)
+    qc5.metric("⚪ Sem observação", q_sem_info)
+
+    tc1, tc2, tc3 = st.columns(3)
+    tc1.metric("🟢 Temporal conforme", t_conformes)
+    tc2.metric("🟡 Temporal revisar", t_revisar)
+    tc3.metric("🔴 Risco de faturamento", t_risco)
+
+    st.caption(
+        "Regra temporal piloto: início da improdutiva deve estar dentro "
+        "do campo 'Intervalo de Tempo' e a duração registrada deve ser "
+        "de pelo menos 30 minutos. O painel sinaliza risco; não decide "
+        "automaticamente faturamento."
+    )
+
+    fqual1, fqual2 = st.columns(2)
+
+    with fqual1:
+        filtro_qualidade = st.multiselect(
+            "Filtrar qualidade do apontamento",
+            sorted(
+                analise[
+                    "Qualidade apontamento"
+                ].dropna().unique()
+            ),
+            key="imp_qualidade_apontamento",
+        )
+
+    with fqual2:
+        filtro_temporal = st.multiselect(
+            "Filtrar conformidade temporal",
+            sorted(
+                analise[
+                    "Conformidade temporal"
+                ].dropna().unique()
+            ),
+            key="imp_conformidade_temporal",
+        )
+
+    if filtro_qualidade:
+        analise = analise[
+            analise[
+                "Qualidade apontamento"
+            ].isin(
+                filtro_qualidade
+            )
+        ].copy()
+
+    if filtro_temporal:
+        analise = analise[
+            analise[
+                "Conformidade temporal"
+            ].isin(
+                filtro_temporal
+            )
+        ].copy()
+
+    if analise.empty:
+        st.info(
+            "Nenhuma improdutiva encontrada após aplicar "
+            "os filtros de qualidade/conformidade."
+        )
+        st.stop()
+
+    st.divider()
     st.markdown("### Principais motivos de improdutividade")
 
-    analise = filtrada.copy()
     analise["Motivo OFS"] = analise[
         "Razao_improdutiva"
     ].apply(
@@ -4721,8 +5415,9 @@ elif pagina == "📉 Dashboard de Improdutividade":
     st.divider()
     st.markdown("### Detalhamento das OS improdutivas")
     st.caption(
-        "Os motivos e as observações abaixo são apresentados "
-        "como registrados no OFS."
+        "O motivo e a observação originais do OFS são preservados. "
+        "As colunas de qualidade e conformidade são uma camada analítica "
+        "do painel para priorizar revisões."
     )
 
     colunas_detalhe = [
@@ -4733,8 +5428,22 @@ elif pagina == "📉 Dashboard de Improdutividade":
         "Placa",
         "Oficina",
         "Consultor",
+        "Tecnico_recurso",
+        "Cliente_resultado",
+        "Cidade_resultado",
         "Razao_improdutiva",
         "Observacao_tecnico_improdutiva",
+        "Qualidade apontamento",
+        "Motivo sugerido",
+        "Leitura qualidade",
+        "Intervalo_tempo",
+        "Janela_servico_detalhada",
+        "Inicio_real",
+        "Fim_real",
+        "Duracao_real",
+        "Conformidade temporal",
+        "Elegibilidade",
+        "Leitura temporal",
     ]
 
     colunas_detalhe = [
@@ -4754,6 +5463,14 @@ elif pagina == "📉 Dashboard de Improdutividade":
             "Observacao_tecnico_improdutiva": (
                 "Observação do Técnico"
             ),
+            "Tecnico_recurso": "Técnico / Recurso",
+            "Cliente_resultado": "Cliente",
+            "Cidade_resultado": "Cidade",
+            "Intervalo_tempo": "Janela contratada",
+            "Janela_servico_detalhada": "Janela OFS detalhada",
+            "Inicio_real": "Início",
+            "Fim_real": "Fim",
+            "Duracao_real": "Duração",
         }
     )
 
