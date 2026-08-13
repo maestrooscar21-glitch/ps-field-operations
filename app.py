@@ -4076,7 +4076,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.4.1 — Auditoria contextual das improdutivas"
+        "Versão 2.4.2 — Visão semanal de MCI e MD"
     )
 
 
@@ -4382,6 +4382,203 @@ elif pagina == "📊 Dashboard Executivo":
         escopo="consolidado_geral",
         contexto="Consolidado geral de manutenções de todas as datas completas",
     )
+
+    # =====================================================
+    # VISÃO SEMANAL — MCI E MD
+    # =====================================================
+
+    st.divider()
+    st.subheader("Visão semanal de MCI e MD")
+    st.caption(
+        "Semanas operacionais de segunda a domingo. "
+        "A semana atual considera apenas as datas completas já importadas."
+    )
+
+    semanal_base = consolidado_enriquecido.copy()
+    semanal_base["__Data_dt"] = pd.to_datetime(
+        semanal_base["Data Operacional"],
+        errors="coerce",
+    )
+
+    semanal_base = semanal_base[
+        semanal_base["__Data_dt"].notna()
+    ].copy()
+
+    if not semanal_base.empty:
+        semanal_base["__Inicio_semana"] = (
+            semanal_base["__Data_dt"]
+            - pd.to_timedelta(
+                semanal_base["__Data_dt"].dt.weekday,
+                unit="D",
+            )
+        ).dt.normalize()
+
+        blocos_semanais = []
+
+        for inicio_semana, grupo_semana in (
+            semanal_base
+            .groupby("__Inicio_semana")
+        ):
+            fim_semana = (
+                inicio_semana
+                + pd.Timedelta(days=6)
+            )
+
+            indicadores_semana = calcular_indicadores(
+                grupo_semana
+            )
+
+            blocos_semanais.append(
+                {
+                    "Semana": (
+                        f"{inicio_semana.strftime('%d/%m')} "
+                        f"a {fim_semana.strftime('%d/%m')}"
+                    ),
+                    "Início": inicio_semana,
+                    "Fim": fim_semana,
+                    "Agendadas": indicadores_semana["Planejadas"],
+                    "Executadas agendadas": (
+                        indicadores_semana["Executadas planejadas"]
+                    ),
+                    "Executadas extras": (
+                        indicadores_semana["Executadas extras"]
+                    ),
+                    "Improdutivas": indicadores_semana["Improdutivas"],
+                    "No-show": indicadores_semana["No-show"],
+                    "Canceladas": indicadores_semana["Canceladas"],
+                    "MCI": indicadores_semana["MCI"],
+                    "MD": indicadores_semana["MD"],
+                    "Datas completas": int(
+                        grupo_semana[
+                            "Data Operacional"
+                        ].astype(str).nunique()
+                    ),
+                }
+            )
+
+        resumo_semanal = pd.DataFrame(
+            blocos_semanais
+        ).sort_values(
+            "Início",
+            ascending=False,
+        )
+
+        resumo_exibicao = resumo_semanal[
+            [
+                "Semana",
+                "Agendadas",
+                "Executadas agendadas",
+                "Executadas extras",
+                "Improdutivas",
+                "No-show",
+                "Canceladas",
+                "MCI",
+                "MD",
+                "Datas completas",
+            ]
+        ].copy()
+
+        resumo_exibicao["MCI"] = (
+            resumo_exibicao["MCI"]
+            .apply(lambda valor: f"{valor:.1f}%")
+        )
+        resumo_exibicao["MD"] = (
+            resumo_exibicao["MD"]
+            .apply(lambda valor: f"{valor:.1f}%")
+        )
+
+        st.dataframe(
+            resumo_exibicao,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        semanas_opcoes = resumo_semanal[
+            "Semana"
+        ].tolist()
+
+        semana_selecionada = st.selectbox(
+            "Detalhar semana",
+            semanas_opcoes,
+            key="dashboard_semana_mci_md",
+        )
+
+        linha_semana = resumo_semanal[
+            resumo_semanal["Semana"]
+            == semana_selecionada
+        ].iloc[0]
+
+        inicio_sel = linha_semana["Início"]
+        fim_sel = linha_semana["Fim"]
+
+        base_semana_sel = semanal_base[
+            (
+                semanal_base["__Data_dt"]
+                >= inicio_sel
+            )
+            & (
+                semanal_base["__Data_dt"]
+                <= fim_sel
+            )
+        ].copy()
+
+        indicadores_sel = calcular_indicadores(
+            base_semana_sel
+        )
+
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric(
+            "MCI da semana",
+            f"{indicadores_sel['MCI']:.1f}%",
+        )
+        s2.metric(
+            "MD da semana",
+            f"{indicadores_sel['MD']:.1f}%",
+        )
+        s3.metric(
+            "Agendadas",
+            indicadores_sel["Planejadas"],
+        )
+        s4.metric(
+            "Executadas agendadas",
+            indicadores_sel["Executadas planejadas"],
+        )
+
+        s5, s6, s7, s8 = st.columns(4)
+        s5.metric(
+            "Improdutivas",
+            indicadores_sel["Improdutivas"],
+        )
+        s6.metric(
+            "No-show",
+            indicadores_sel["No-show"],
+        )
+        s7.metric(
+            "Canceladas",
+            indicadores_sel["Canceladas"],
+        )
+        s8.metric(
+            "Execuções extras",
+            indicadores_sel["Executadas extras"],
+        )
+
+        exibir_detalhamento(
+            base_semana_sel,
+            escopo=(
+                "semana_"
+                + inicio_sel.strftime("%Y_%m_%d")
+            ),
+            contexto=(
+                "Semana "
+                f"{inicio_sel.strftime('%d/%m/%Y')} "
+                "a "
+                f"{fim_sel.strftime('%d/%m/%Y')}"
+            ),
+        )
+    else:
+        st.info(
+            "Não há dados suficientes para montar a visão semanal."
+        )
 
     # =====================================================
     # VISÃO DA DATA SELECIONADA
