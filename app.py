@@ -900,9 +900,10 @@ def conciliar_bases(
         if linha.get("_merge") == "right_only":
             return False
 
-        if not bool(linha.get("Ativa_planejamento", False)):
-            return False
-
+        # IMPORTANTE:
+        # ativa_no_planejamento representa a fotografia MAIS RECENTE.
+        # Ela não pode apagar o fato de que a OS estava na fotografia
+        # inicial usada como planejamento-base daquele dia.
         primeira_data = converter_data_operacional(
             linha.get("Primeira_aparicao_data", "")
         )
@@ -1025,15 +1026,19 @@ def conciliar_bases(
             return "Status intermediário agendado"
 
         # Nova regra, a partir da data de corte.
-        if origem_merge == "left_only" and not ativa:
-            return "Retirada do agendamento"
-
+        # A classificação do destino não altera o denominador original
+        # do planejamento: uma OS que estava na fotografia inicial
+        # continua sendo planejada, mesmo que depois seja cancelada
+        # ou retirada de uma fotografia posterior.
         if (
             origem_merge in {"left_only", "both"}
-            and ativa
+            and agendada
             and status_cancelado(status_planejado)
         ):
             return "Cancelada no agendamento"
+
+        if origem_merge == "left_only" and not ativa:
+            return "Retirada do agendamento"
 
         if origem_merge == "left_only":
             if agendada:
@@ -1167,8 +1172,9 @@ def conciliar_bases(
             )
         if classificacao == "Retirada do agendamento":
             return (
-                "A OS apareceu em fotografia anterior, mas não está mais "
-                "no agendamento vigente dessa data."
+                "A OS fazia parte do planejamento-base do dia, mas deixou "
+                "de aparecer em uma fotografia posterior. Ela continua "
+                "contando no total originalmente planejado."
             )
 
         return (
@@ -1223,19 +1229,34 @@ def conciliar_bases(
 
 
 def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
-    agendadas_validas = {
-        "Executada agendada",
-        "Improdutiva agendada",
-        "Cancelada",
-        "No-show",
-        "Status intermediário agendado",
-    }
-
-    manutencoes_agendadas = int(
-        conciliacao["Classificação"].isin(
-            agendadas_validas
-        ).sum()
-    )
+    # Fonte de verdade do denominador:
+    # toda OS reconhecida como parte da fotografia-base do planejamento.
+    # O destino posterior (executada, cancelada, retirada, no-show etc.)
+    # não deve diminuir o total originalmente planejado.
+    if "Origem Agendamento" in conciliacao.columns:
+        manutencoes_agendadas = int(
+            (
+                conciliacao["Origem Agendamento"]
+                == "Agendada"
+            ).sum()
+        )
+    else:
+        # Compatibilidade defensiva com históricos muito antigos.
+        agendadas_validas = {
+            "Executada agendada",
+            "Improdutiva agendada",
+            "Cancelada",
+            "Cancelada no agendamento",
+            "Retirada do agendamento",
+            "Possível substituição de OS",
+            "No-show",
+            "Status intermediário agendado",
+        }
+        manutencoes_agendadas = int(
+            conciliacao["Classificação"].isin(
+                agendadas_validas
+            ).sum()
+        )
 
     agendadas_executadas = int(
         (
@@ -2576,10 +2597,19 @@ def filtrar_detalhes(
     filtro: str,
 ) -> pd.DataFrame:
     if filtro in {"Planejadas", "Manutenções agendadas"}:
+        if "Origem Agendamento" in conciliacao.columns:
+            return conciliacao[
+                conciliacao["Origem Agendamento"]
+                == "Agendada"
+            ].copy()
+
         classes = [
             "Executada agendada",
             "Improdutiva agendada",
             "Cancelada",
+            "Cancelada no agendamento",
+            "Retirada do agendamento",
+            "Possível substituição de OS",
             "No-show",
             "Status intermediário agendado",
         ]
@@ -4192,7 +4222,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.4.4 — Correção do planejamento diário e primeira fotografia"
+        "Versão 2.4.5 — Planejamento-base preservado no denominador"
     )
 
 
