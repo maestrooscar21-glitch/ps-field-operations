@@ -739,6 +739,10 @@ def conciliar_bases(
             OS_planejada=("OS", juntar_unicos),
             Oficina_planejada=("Oficina", "first"),
             Status_planejado=("Status da Atividade", juntar_unicos),
+            Primeira_aparicao=(
+                "__Primeira Aparição",
+                "first",
+            ),
             Primeira_aparicao_data=(
                 "__Primeira Aparição Data",
                 "first",
@@ -819,6 +823,79 @@ def conciliar_bases(
 
         return data_operacional >= DATA_CORTE_NOVA_REGRA
 
+    # -----------------------------------------------------
+    # REGRA DE AGENDAMENTO — CORREÇÃO v2.4.4
+    # -----------------------------------------------------
+    # Antes, uma OS só era considerada agendada quando sua
+    # primeira aparição ocorria em um DIA anterior à execução.
+    # Isso zerava o planejado quando a primeira fotografia do
+    # dia era importada no próprio dia.
+    #
+    # Nova lógica:
+    # 1) apareceu antes do dia operacional -> Agendada;
+    # 2) apareceu no próprio dia, mas já estava na PRIMEIRA
+    #    fotografia daquele planejamento -> Agendada;
+    # 3) apareceu somente em uma fotografia posterior do mesmo
+    #    dia -> Extra / encaixe;
+    # 4) histórico antigo sem timestamp usa presença ativa no
+    #    planejado como fallback seguro.
+
+    def timestamp_primeira_aparicao(valor):
+        texto = texto_limpo(valor)
+
+        if not texto:
+            return pd.NaT
+
+        return pd.to_datetime(
+            texto,
+            errors="coerce",
+            utc=True,
+        )
+
+    primeiras_validas = pd.to_datetime(
+        resumo_planejado.get(
+            "Primeira_aparicao",
+            pd.Series(dtype=str),
+        ),
+        errors="coerce",
+        utc=True,
+    )
+
+    primeira_fotografia_mesmo_dia = pd.NaT
+
+    if not primeiras_validas.empty:
+        # Considera somente registros cuja primeira aparição
+        # ocorreu na própria data operacional analisada.
+        datas_primeira = resumo_planejado[
+            "Primeira_aparicao_data"
+        ].apply(
+            converter_data_operacional
+        )
+
+        datas_operacionais_planejadas = resumo_planejado[
+            "Data_operacional_planejada"
+        ].apply(
+            converter_data_operacional
+        )
+
+        mascara_mesmo_dia = (
+            datas_primeira.notna()
+            & datas_operacionais_planejadas.notna()
+            & (
+                datas_primeira
+                == datas_operacionais_planejadas
+            )
+        )
+
+        candidatos_primeira_foto = primeiras_validas[
+            mascara_mesmo_dia
+        ].dropna()
+
+        if not candidatos_primeira_foto.empty:
+            primeira_fotografia_mesmo_dia = (
+                candidatos_primeira_foto.min()
+            )
+
     def eh_agendada_nova(linha) -> bool:
         if linha.get("_merge") == "right_only":
             return False
@@ -826,15 +903,53 @@ def conciliar_bases(
         if not bool(linha.get("Ativa_planejamento", False)):
             return False
 
-        primeira = converter_data_operacional(
+        primeira_data = converter_data_operacional(
             linha.get("Primeira_aparicao_data", "")
         )
         data_operacional = data_referencia_linha(linha)
 
-        if not primeira or not data_operacional:
+        if not data_operacional:
             return False
 
-        return primeira < data_operacional
+        # Já existia antes do dia operacional.
+        if (
+            primeira_data
+            and primeira_data < data_operacional
+        ):
+            return True
+
+        # Compatibilidade com histórico em que não havia
+        # controle de primeira aparição.
+        if not primeira_data:
+            return True
+
+        # Surgiu depois da data operacional: não é agendada.
+        if primeira_data > data_operacional:
+            return False
+
+        # Daqui em diante, primeira_data == data_operacional.
+        primeira_ts = timestamp_primeira_aparicao(
+            linha.get("Primeira_aparicao", "")
+        )
+
+        # Histórico antigo sem timestamp: se estava ativo no
+        # planejado, preservamos como agendado.
+        if pd.isna(primeira_ts):
+            return True
+
+        # Se não conseguimos identificar a primeira fotografia
+        # do dia, preservamos a presença no planejamento.
+        if pd.isna(primeira_fotografia_mesmo_dia):
+            return True
+
+        # Pequena tolerância para registros gravados em lote na
+        # mesma importação, que podem ter diferenças mínimas.
+        tolerancia = pd.Timedelta(minutes=2)
+
+        return (
+            primeira_ts
+            <= primeira_fotografia_mesmo_dia + tolerancia
+        )
 
     def eh_agendada_historica(linha) -> bool:
         # Na regra antiga, toda manutenção válida presente no planejado
@@ -997,8 +1112,9 @@ def conciliar_bases(
 
         if classificacao == "Executada agendada":
             return (
-                f"Manutenção já estava agendada antes de {data_operacional} "
-                f"(primeira aparição: {primeira}) e foi executada."
+                "Manutenção reconhecida como parte do planejamento vigente "
+                f"de {data_operacional} "
+                f"(primeira aparição registrada: {primeira}) e foi executada."
             )
         if classificacao == "Executada extra":
             return (
@@ -4076,7 +4192,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.4.3 — MCI e MD semanal no Painel do Consultor"
+        "Versão 2.4.4 — Correção do planejamento diário e primeira fotografia"
     )
 
 
