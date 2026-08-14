@@ -774,6 +774,21 @@ def conciliar_bases(
         indicator=True,
     )
 
+    # Compatibilidade histórica:
+    # datas importadas antes da criação da coluna planejamento_base
+    # podem ter todos os registros com False. Nessa situação, não
+    # devemos zerar o planejado nem transformar tudo em extra.
+    #
+    # Como conciliar_bases() é executada uma vez por data operacional,
+    # basta verificar se existe ao menos uma OS-base válida nesta data.
+    tem_planejamento_base_persistido = bool(
+        "Planejamento_base" in resumo_planejado.columns
+        and resumo_planejado["Planejamento_base"]
+        .fillna(False)
+        .astype(bool)
+        .any()
+    )
+
     # Auditoria de substituição de OS:
     # se a OS planejada não aparece pelo mesmo atendimento, procuramos
     # outra OS no resultado com o MESMO Ticket Jira + MESMA placa.
@@ -828,7 +843,14 @@ def conciliar_bases(
         if not data_operacional:
             return False
 
-        return data_operacional >= DATA_CORTE_NOVA_REGRA
+        # A regra nova só pode ser aplicada quando a data possui
+        # planejamento_base efetivamente reconstruído/persistido.
+        # Caso contrário, preservamos a regra histórica para não
+        # zerar o planejado de 08 a 12/08.
+        return bool(
+            data_operacional >= DATA_CORTE_NOVA_REGRA
+            and tem_planejamento_base_persistido
+        )
 
     # -----------------------------------------------------
     # REGRA DE AGENDAMENTO — v2.4.6
@@ -4169,7 +4191,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.4.7 — Reconstrução segura do planejamento-base"
+        "Versão 2.4.8 — Compatibilidade histórica 08–12/08"
     )
 
 
