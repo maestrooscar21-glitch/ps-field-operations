@@ -1490,10 +1490,17 @@ def salvar_planejamento_janela(
             for registro in existentes
         }
 
-        # A primeira fotografia efetivamente salva para a data
-        # congela o planejamento-base. Em fotografias posteriores,
-        # OS novas são encaixes/extras e não alteram o denominador.
-        primeira_fotografia_da_data = not bool(existentes)
+        # A primeira fotografia-base é aquela salva quando ainda
+        # não existe nenhuma OS marcada como planejamento_base=True
+        # para a data. Isso também permite reconstruir corretamente
+        # datas históricas existentes antes da criação dessa coluna.
+        #
+        # Depois que ao menos uma OS-base existe, importações seguintes
+        # preservam o denominador e novas OS entram como encaixe/extra.
+        primeira_fotografia_da_data = not any(
+            bool(registro.get("planejamento_base", False))
+            for registro in existentes
+        )
 
         # Tudo que não reaparecer nesta fotografia deixa de ser
         # agendamento vigente, mas continua salvo para auditoria.
@@ -4162,7 +4169,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.4.6 — Planejamento-base persistido no Supabase"
+        "Versão 2.4.7 — Reconstrução segura do planejamento-base"
     )
 
 
