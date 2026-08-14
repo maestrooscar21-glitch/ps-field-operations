@@ -666,6 +666,9 @@ def conciliar_bases(
     if "__Ativa no Planejamento" not in planejado.columns:
         planejado["__Ativa no Planejamento"] = True
 
+    if "__Planejamento Base" not in planejado.columns:
+        planejado["__Planejamento Base"] = False
+
     if "__Primeira Aparição Data" not in planejado.columns:
         planejado["__Primeira Aparição Data"] = ""
 
@@ -755,6 +758,10 @@ def conciliar_bases(
                 "__Ativa no Planejamento",
                 "max",
             ),
+            Planejamento_base=(
+                "__Planejamento Base",
+                "max",
+            ),
             Qtd_planejada=("Chave Atendimento", "size"),
         )
         .reset_index()
@@ -824,132 +831,26 @@ def conciliar_bases(
         return data_operacional >= DATA_CORTE_NOVA_REGRA
 
     # -----------------------------------------------------
-    # REGRA DE AGENDAMENTO — CORREÇÃO v2.4.4
+    # REGRA DE AGENDAMENTO — v2.4.6
     # -----------------------------------------------------
-    # Antes, uma OS só era considerada agendada quando sua
-    # primeira aparição ocorria em um DIA anterior à execução.
-    # Isso zerava o planejado quando a primeira fotografia do
-    # dia era importada no próprio dia.
+    # A partir desta versão, a fonte de verdade é a coluna
+    # planejamento_base persistida no Supabase.
     #
-    # Nova lógica:
-    # 1) apareceu antes do dia operacional -> Agendada;
-    # 2) apareceu no próprio dia, mas já estava na PRIMEIRA
-    #    fotografia daquele planejamento -> Agendada;
-    # 3) apareceu somente em uma fotografia posterior do mesmo
-    #    dia -> Extra / encaixe;
-    # 4) histórico antigo sem timestamp usa presença ativa no
-    #    planejado como fallback seguro.
-
-    def timestamp_primeira_aparicao(valor):
-        texto = texto_limpo(valor)
-
-        if not texto:
-            return pd.NaT
-
-        return pd.to_datetime(
-            texto,
-            errors="coerce",
-            utc=True,
-        )
-
-    primeiras_validas = pd.to_datetime(
-        resumo_planejado.get(
-            "Primeira_aparicao",
-            pd.Series(dtype=str),
-        ),
-        errors="coerce",
-        utc=True,
-    )
-
-    primeira_fotografia_mesmo_dia = pd.NaT
-
-    if not primeiras_validas.empty:
-        # Considera somente registros cuja primeira aparição
-        # ocorreu na própria data operacional analisada.
-        datas_primeira = resumo_planejado[
-            "Primeira_aparicao_data"
-        ].apply(
-            converter_data_operacional
-        )
-
-        datas_operacionais_planejadas = resumo_planejado[
-            "Data_operacional_planejada"
-        ].apply(
-            converter_data_operacional
-        )
-
-        mascara_mesmo_dia = (
-            datas_primeira.notna()
-            & datas_operacionais_planejadas.notna()
-            & (
-                datas_primeira
-                == datas_operacionais_planejadas
-            )
-        )
-
-        candidatos_primeira_foto = primeiras_validas[
-            mascara_mesmo_dia
-        ].dropna()
-
-        if not candidatos_primeira_foto.empty:
-            primeira_fotografia_mesmo_dia = (
-                candidatos_primeira_foto.min()
-            )
+    # - Primeira fotografia da data:
+    #   OS não cancelada -> planejamento_base = True
+    # - Atualizações posteriores:
+    #   preservam True para quem já era base
+    #   e novas OS entram como False (extra/encaixe).
+    #
+    # Assim, cancelamentos, retiradas e atualizações posteriores
+    # nunca apagam o compromisso original do dia.
 
     def eh_agendada_nova(linha) -> bool:
         if linha.get("_merge") == "right_only":
             return False
 
-        # IMPORTANTE:
-        # ativa_no_planejamento representa a fotografia MAIS RECENTE.
-        # Ela não pode apagar o fato de que a OS estava na fotografia
-        # inicial usada como planejamento-base daquele dia.
-        primeira_data = converter_data_operacional(
-            linha.get("Primeira_aparicao_data", "")
-        )
-        data_operacional = data_referencia_linha(linha)
-
-        if not data_operacional:
-            return False
-
-        # Já existia antes do dia operacional.
-        if (
-            primeira_data
-            and primeira_data < data_operacional
-        ):
-            return True
-
-        # Compatibilidade com histórico em que não havia
-        # controle de primeira aparição.
-        if not primeira_data:
-            return True
-
-        # Surgiu depois da data operacional: não é agendada.
-        if primeira_data > data_operacional:
-            return False
-
-        # Daqui em diante, primeira_data == data_operacional.
-        primeira_ts = timestamp_primeira_aparicao(
-            linha.get("Primeira_aparicao", "")
-        )
-
-        # Histórico antigo sem timestamp: se estava ativo no
-        # planejado, preservamos como agendado.
-        if pd.isna(primeira_ts):
-            return True
-
-        # Se não conseguimos identificar a primeira fotografia
-        # do dia, preservamos a presença no planejamento.
-        if pd.isna(primeira_fotografia_mesmo_dia):
-            return True
-
-        # Pequena tolerância para registros gravados em lote na
-        # mesma importação, que podem ter diferenças mínimas.
-        tolerancia = pd.Timedelta(minutes=2)
-
-        return (
-            primeira_ts
-            <= primeira_fotografia_mesmo_dia + tolerancia
+        return bool(
+            linha.get("Planejamento_base", False)
         )
 
     def eh_agendada_historica(linha) -> bool:
@@ -1413,6 +1314,7 @@ def registro_atividade(
     ultima_aparicao: str | None = None,
     ativa_no_planejamento: bool | None = None,
     nome_arquivo_primeira_aparicao: str | None = None,
+    planejamento_base: bool | None = None,
 ) -> dict:
     dados = {
         str(coluna): texto_limpo(valor)
@@ -1462,6 +1364,11 @@ def registro_atividade(
     if nome_arquivo_primeira_aparicao is not None:
         registro["nome_arquivo_primeira_aparicao"] = (
             nome_arquivo_primeira_aparicao
+        )
+
+    if planejamento_base is not None:
+        registro["planejamento_base"] = bool(
+            planejamento_base
         )
 
     return registro
@@ -1583,6 +1490,11 @@ def salvar_planejamento_janela(
             for registro in existentes
         }
 
+        # A primeira fotografia efetivamente salva para a data
+        # congela o planejamento-base. Em fotografias posteriores,
+        # OS novas são encaixes/extras e não alteram o denominador.
+        primeira_fotografia_da_data = not bool(existentes)
+
         # Tudo que não reaparecer nesta fotografia deixa de ser
         # agendamento vigente, mas continua salvo para auditoria.
         if existentes:
@@ -1618,6 +1530,26 @@ def salvar_planejamento_janela(
                 else nome_arquivo
             )
 
+            if anterior:
+                eh_planejamento_base = bool(
+                    anterior.get(
+                        "planejamento_base",
+                        False,
+                    )
+                )
+            else:
+                # Na primeira fotografia da data, somente OS ainda
+                # válidas/não canceladas formam o compromisso original.
+                eh_planejamento_base = bool(
+                    primeira_fotografia_da_data
+                    and not status_cancelado(
+                        linha.get(
+                            "Status da Atividade",
+                            "",
+                        )
+                    )
+                )
+
             registro = registro_atividade(
                 linha,
                 data_operacional,
@@ -1627,6 +1559,7 @@ def salvar_planejamento_janela(
                 ultima_aparicao=agora_iso,
                 ativa_no_planejamento=True,
                 nome_arquivo_primeira_aparicao=arquivo_primeira,
+                planejamento_base=eh_planejamento_base,
             )
             registros.append(registro)
 
@@ -1839,6 +1772,12 @@ def carregar_base(
                     "__Arquivo Primeira Aparição": registro.get(
                         "nome_arquivo_primeira_aparicao",
                         "",
+                    ),
+                    "__Planejamento Base": bool(
+                        registro.get(
+                            "planejamento_base",
+                            False,
+                        )
                     ),
                 }
             )
@@ -2675,6 +2614,7 @@ def exibir_detalhamento(
         "Troca de OS",
         "Regra Aplicada",
         "Origem Agendamento",
+        "Planejamento_base",
         "Primeira_aparicao_data",
         "Data_operacional_planejada",
         "Status_planejado",
@@ -4222,7 +4162,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.4.5 — Planejamento-base preservado no denominador"
+        "Versão 2.4.6 — Planejamento-base persistido no Supabase"
     )
 
 
