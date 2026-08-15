@@ -1827,6 +1827,43 @@ def listar_bases() -> pd.DataFrame:
     return pd.DataFrame(registros)
 
 
+@st.cache_data(ttl=CACHE_TTL_SEGUNDOS, show_spinner=False)
+def listar_datas_completas_reais() -> list[str]:
+    """
+    Retorna somente datas com registros reais nas duas tabelas:
+    atividades_planejadas e atividades_resultado.
+
+    Isso evita que o seletor dependa exclusivamente de
+    bases_importadas, que pode ficar desatualizada após reparos.
+    """
+    planejados = buscar_todos(
+        "atividades_planejadas",
+        colunas="data_operacional",
+        ordem="data_operacional",
+    )
+    resultados = buscar_todos(
+        "atividades_resultado",
+        colunas="data_operacional",
+        ordem="data_operacional",
+    )
+
+    datas_planejado = {
+        texto_limpo(r.get("data_operacional", ""))
+        for r in planejados
+        if texto_limpo(r.get("data_operacional", ""))
+    }
+    datas_resultado = {
+        texto_limpo(r.get("data_operacional", ""))
+        for r in resultados
+        if texto_limpo(r.get("data_operacional", ""))
+    }
+
+    return sorted(
+        datas_planejado & datas_resultado,
+        reverse=True,
+    )
+
+
 def excluir_base(tipo: str, data_operacional: str) -> None:
     cliente = exigir_supabase()
     tabela = TABELA_POR_TIPO[tipo]
@@ -4191,7 +4228,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.4.8 — Compatibilidade histórica 08–12/08"
+        "Versão 2.4.9 — Datas completas pela presença real no banco"
     )
 
 
@@ -4434,23 +4471,7 @@ elif pagina == "📊 Dashboard Executivo":
         st.warning("Importe ao menos um planejado e um resultado.")
         st.stop()
 
-    datas_planejado = set(
-        bases.loc[
-            bases["tipo"] == "planejado",
-            "data_operacional",
-        ].astype(str)
-    )
-    datas_resultado = set(
-        bases.loc[
-            bases["tipo"] == "resultado",
-            "data_operacional",
-        ].astype(str)
-    )
-
-    datas_completas = sorted(
-        datas_planejado & datas_resultado,
-        reverse=True,
-    )
+    datas_completas = listar_datas_completas_reais()
 
     if not datas_completas:
         st.warning(
@@ -4795,23 +4816,7 @@ elif pagina == "👤 Painel do Consultor":
         st.warning("Importe ao menos um planejado e um resultado.")
         st.stop()
 
-    datas_planejado = set(
-        bases.loc[
-            bases["tipo"] == "planejado",
-            "data_operacional",
-        ].astype(str)
-    )
-    datas_resultado = set(
-        bases.loc[
-            bases["tipo"] == "resultado",
-            "data_operacional",
-        ].astype(str)
-    )
-
-    datas_completas = sorted(
-        datas_planejado & datas_resultado,
-        reverse=True,
-    )
+    datas_completas = listar_datas_completas_reais()
 
     if not datas_completas:
         st.warning(
@@ -5481,22 +5486,7 @@ elif pagina == "📉 Dashboard de Improdutividade":
         st.warning("Não existem bases salvas para análise.")
         st.stop()
 
-    datas_planejado = set(
-        bases.loc[
-            bases["tipo"] == "planejado",
-            "data_operacional",
-        ].astype(str)
-    )
-    datas_resultado = set(
-        bases.loc[
-            bases["tipo"] == "resultado",
-            "data_operacional",
-        ].astype(str)
-    )
-
-    datas_completas = sorted(
-        datas_planejado & datas_resultado
-    )
+    datas_completas = sorted(listar_datas_completas_reais())
 
     if not datas_completas:
         st.warning(
@@ -6115,22 +6105,7 @@ elif pagina == "🔄 Follow × Resultado OFS":
         st.warning("Não existem bases de resultado para cruzamento.")
         st.stop()
 
-    datas_planejado = set(
-        bases.loc[
-            bases["tipo"] == "planejado",
-            "data_operacional",
-        ].astype(str)
-    )
-    datas_resultado = set(
-        bases.loc[
-            bases["tipo"] == "resultado",
-            "data_operacional",
-        ].astype(str)
-    )
-
-    datas_completas = sorted(
-        datas_planejado & datas_resultado
-    )
+    datas_completas = sorted(listar_datas_completas_reais())
 
     if not datas_completas:
         st.warning(
