@@ -3855,6 +3855,28 @@ def exibir_diagnostico_md_semanal(base_semana: pd.DataFrame, inicio_semana, fim_
     if ranking_oficina.empty:
         ranking_oficina = ranking_md_dimensao(base_semana, "Oficina", minimo_base_md=1)
 
+    st.markdown('<div id="md-diagnostico-cards"></div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stVerticalBlock"]:has(#md-diagnostico-cards)
+        div[data-testid="stMetricValue"] {
+            font-size: 1.55rem !important;
+            line-height: 1.12 !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(#md-diagnostico-cards)
+        div[data-testid="stMetricLabel"] {
+            font-size: 0.84rem !important;
+        }
+        div[data-testid="stVerticalBlock"]:has(#md-diagnostico-cards)
+        div[data-testid="stMetricDelta"] {
+            font-size: 0.76rem !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(
         "MD geral",
@@ -3953,6 +3975,77 @@ def exibir_diagnostico_md_semanal(base_semana: pd.DataFrame, inicio_semana, fim_
                 ]],
                 use_container_width=True,
                 hide_index=True,
+            )
+
+    st.markdown("#### Destaques da semana")
+
+    ranking_impacto = ranking_md_dimensao(
+        base_semana,
+        "Oficina",
+        minimo_base_md=1,
+    )
+    if not ranking_impacto.empty:
+        ranking_impacto = ranking_impacto.sort_values(
+            ["Improdutivas", "MD (%)", "Base MD"],
+            ascending=[False, False, False],
+        ).reset_index(drop=True)
+
+    ranking_positivo = ranking_md_dimensao(
+        base_semana,
+        "Oficina",
+        minimo_base_md=5,
+    )
+    if ranking_positivo.empty:
+        ranking_positivo = ranking_md_dimensao(
+            base_semana,
+            "Oficina",
+            minimo_base_md=3,
+        )
+
+    if not ranking_positivo.empty:
+        ranking_positivo = ranking_positivo.sort_values(
+            ["MD (%)", "Base MD", "Improdutivas"],
+            ascending=[True, False, True],
+        ).reset_index(drop=True)
+
+    d1, d2 = st.columns(2)
+
+    with d1:
+        st.markdown("**🔴 Maior impacto de improdutividade**")
+        if ranking_impacto.empty:
+            st.info("Sem dados suficientes.")
+        else:
+            pior = ranking_impacto.iloc[0]
+            st.markdown(
+                f"**{pior['Oficina']}**  \n"
+                f"{int(pior['Improdutivas'])} improdutiva(s) · "
+                f"MD {pior['MD (%)']:.1f}% · "
+                f"Base MD {int(pior['Base MD'])}  \n"
+                f"Principal motivo: {pior['Principal motivo']}"
+            )
+
+    with d2:
+        st.markdown("**🟢 Melhor desempenho MD**")
+        if ranking_positivo.empty:
+            st.info("Sem dados suficientes.")
+        else:
+            melhor = ranking_positivo.iloc[0]
+            st.markdown(
+                f"**{melhor['Oficina']}**  \n"
+                f"{int(melhor['Improdutivas'])} improdutiva(s) · "
+                f"MD {melhor['MD (%)']:.1f}% · "
+                f"Base MD {int(melhor['Base MD'])}  \n"
+                f"Principal motivo: {melhor['Principal motivo']}"
+            )
+
+    if not ranking_positivo.empty:
+        zeros = ranking_positivo[
+            ranking_positivo["Improdutivas"] == 0
+        ]
+        if not zeros.empty:
+            st.caption(
+                f"🏆 {len(zeros)} oficina(s) com zero improdutividade "
+                "e volume relevante na semana."
             )
 
     st.markdown("#### Ranking nacional de oficinas por MD")
@@ -4625,7 +4718,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.5.1 — Diagnóstico semanal MD por motivo, região e oficina"
+        "Versão 2.5.2 — Diagnóstico semanal MD por motivo, região e oficina"
     )
 
 
