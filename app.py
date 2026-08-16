@@ -3950,33 +3950,6 @@ def exibir_diagnostico_md_semanal(base_semana: pd.DataFrame, inicio_semana, fim_
     if conexoes:
         st.dataframe(pd.DataFrame(conexoes), use_container_width=True, hide_index=True)
 
-    e1, e2 = st.columns(2)
-    with e1:
-        st.markdown("#### Top motivos de improdutividade")
-        if motivos.empty:
-            st.info("Sem improdutivas na semana selecionada.")
-        else:
-            top_motivos = motivos.head(8).copy()
-            top_motivos["% das improdutivas"] = top_motivos["% das improdutivas"].map(lambda v: f"{v:.1f}%")
-            st.dataframe(top_motivos, use_container_width=True, hide_index=True)
-
-    with e2:
-        st.markdown("#### Ranking de regiões por MD")
-        if ranking_regiao.empty:
-            st.info("Sem dados regionais suficientes.")
-        else:
-            exibir_regioes = ranking_regiao.head(8).copy()
-            exibir_regioes["MD (%)"] = exibir_regioes["MD (%)"].map(lambda v: f"{v:.1f}%")
-            exibir_regioes["% motivo"] = exibir_regioes["% motivo"].map(lambda v: f"{v:.1f}%")
-            st.dataframe(
-                exibir_regioes[[
-                    "Região", "Executadas", "Improdutivas", "Base MD",
-                    "MD (%)", "Principal motivo", "% motivo",
-                ]],
-                use_container_width=True,
-                hide_index=True,
-            )
-
     st.markdown("#### Destaques da semana")
 
     ranking_impacto = ranking_md_dimensao(
@@ -4048,21 +4021,10 @@ def exibir_diagnostico_md_semanal(base_semana: pd.DataFrame, inicio_semana, fim_
                 "e volume relevante na semana."
             )
 
-    st.markdown("#### Ranking nacional de oficinas por MD")
-    if ranking_oficina.empty:
-        st.info("Sem dados de oficina suficientes.")
-    else:
-        exibir_oficinas = ranking_oficina.head(10).copy()
-        exibir_oficinas["MD (%)"] = exibir_oficinas["MD (%)"].map(lambda v: f"{v:.1f}%")
-        exibir_oficinas["% motivo"] = exibir_oficinas["% motivo"].map(lambda v: f"{v:.1f}%")
-        st.dataframe(
-            exibir_oficinas[[
-                "Oficina", "Consultor", "Região", "Executadas",
-                "Improdutivas", "Base MD", "MD (%)", "Principal motivo", "% motivo",
-            ]],
-            use_container_width=True,
-            hide_index=True,
-        )
+    st.caption(
+        "Rankings completos por motivo, região e oficina estão no "
+        "Dashboard de Improdutividade."
+    )
 
     st.caption(
         "Este bloco é diagnóstico. A definição de quando abrir ação/QPI "
@@ -4718,7 +4680,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.5.2 — Diagnóstico semanal MD por motivo, região e oficina"
+        "Versão 2.5.3 — Executivo enxuto e rankings MD na improdutividade"
     )
 
 
@@ -6142,6 +6104,133 @@ elif pagina == "📉 Dashboard de Improdutividade":
     if filtrada.empty:
         st.info("Nenhuma improdutiva encontrada com esses filtros.")
         st.stop()
+
+    # =====================================================
+    # RANKINGS E DIAGNÓSTICO MD
+    # =====================================================
+    st.markdown("### 🧭 Rankings e diagnóstico MD")
+    st.caption(
+        "Detalhamento do período filtrado. Canceladas e no-show não entram "
+        "na MD. O ranking crítico e o reconhecimento das oficinas com 0% "
+        "ficam separados para facilitar a leitura."
+    )
+
+    datas_base_completa = pd.to_datetime(
+        base["Data Operacional"],
+        errors="coerce",
+    ).dt.date
+    base_md_filtrada = base[
+        (datas_base_completa >= inicio)
+        & (datas_base_completa <= fim)
+    ].copy()
+
+    if consultor_filtro:
+        base_md_filtrada = base_md_filtrada[
+            base_md_filtrada["Consultor"].isin(consultor_filtro)
+        ].copy()
+
+    if oficina_filtro:
+        base_md_filtrada = base_md_filtrada[
+            base_md_filtrada["Oficina"].isin(oficina_filtro)
+        ].copy()
+
+    if "Consultor" not in base_md_filtrada.columns:
+        base_md_filtrada["Consultor"] = "Não definido"
+
+    base_md_filtrada["Região"] = base_md_filtrada["Consultor"].map(
+        REGIOES_CONSULTORES
+    ).fillna("Não definida")
+
+    motivos_rank = resumo_motivos_md(
+        preparar_diagnostico_md(filtrada)
+    )
+    regioes_rank = ranking_md_dimensao(
+        base_md_filtrada, "Região", minimo_base_md=1
+    )
+    oficinas_rank = ranking_md_dimensao(
+        base_md_filtrada, "Oficina", minimo_base_md=1
+    )
+
+    rr1, rr2 = st.columns(2)
+
+    with rr1:
+        st.markdown("#### Principais motivos")
+        if motivos_rank.empty:
+            st.info("Sem improdutivas para os filtros selecionados.")
+        else:
+            tabela = motivos_rank.copy()
+            tabela["% das improdutivas"] = tabela[
+                "% das improdutivas"
+            ].map(lambda v: f"{v:.1f}%")
+            st.dataframe(tabela, use_container_width=True, hide_index=True)
+
+    with rr2:
+        st.markdown("#### Ranking de regiões por MD")
+        if regioes_rank.empty:
+            st.info("Sem dados regionais suficientes.")
+        else:
+            tabela = regioes_rank.copy()
+            tabela["MD (%)"] = tabela["MD (%)"].map(lambda v: f"{v:.1f}%")
+            tabela["% motivo"] = tabela["% motivo"].map(lambda v: f"{v:.1f}%")
+            st.dataframe(
+                tabela[[
+                    "Região", "Executadas", "Improdutivas", "Base MD",
+                    "MD (%)", "Principal motivo", "% motivo",
+                ]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    st.markdown("#### 🔴 Ranking de oficinas com improdutividade — MD (%)")
+    criticas = oficinas_rank[
+        oficinas_rank["Improdutivas"] > 0
+    ].copy()
+
+    if criticas.empty:
+        st.info("Nenhuma oficina com improdutividade no período filtrado.")
+    else:
+        criticas["MD (%)"] = criticas["MD (%)"].map(lambda v: f"{v:.1f}%")
+        criticas["% motivo"] = criticas["% motivo"].map(lambda v: f"{v:.1f}%")
+        st.dataframe(
+            criticas[[
+                "Oficina", "Consultor", "Região", "Executadas",
+                "Improdutivas", "Base MD", "MD (%)",
+                "Principal motivo", "% motivo",
+            ]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("#### 🏆 Oficinas com 0% de MD")
+    positivas = oficinas_rank[
+        (oficinas_rank["Improdutivas"] == 0)
+        & (oficinas_rank["Base MD"] >= 3)
+    ].copy()
+
+    if positivas.empty:
+        st.info(
+            "Nenhuma oficina com 0% de MD e Base MD mínima de 3 "
+            "no período filtrado."
+        )
+    else:
+        positivas = positivas.sort_values(
+            ["Base MD", "Executadas"],
+            ascending=[False, False],
+        ).reset_index(drop=True)
+        st.caption(
+            f"{len(positivas)} oficina(s) com zero improdutividade. "
+            "Ordenadas pela maior Base MD."
+        )
+        st.dataframe(
+            positivas[[
+                "Oficina", "Consultor", "Região",
+                "Executadas", "Base MD",
+            ]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.divider()
 
     # -----------------------------
     # INDICADORES
