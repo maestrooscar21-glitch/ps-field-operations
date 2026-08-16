@@ -1222,8 +1222,17 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         (conciliacao["Classificação"] == "No-show").sum()
     )
 
-    mci = (
+    # MCI departamental:
+    # considera toda manutenção efetivamente concluída, independentemente
+    # de ter sido agendada ou extra. A separação entre agendada e extra
+    # continua preservada nos cards para transparência operacional.
+    total_executadas = (
         agendadas_executadas
+        + executadas_extras
+    )
+
+    mci = (
+        total_executadas
         / manutencoes_agendadas
         * 100
         if manutencoes_agendadas
@@ -1270,10 +1279,7 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
             else 0.0
         ),
         "Execução total": (
-            (
-                agendadas_executadas
-                + executadas_extras
-            )
+            total_executadas
             / manutencoes_agendadas
             * 100
             if manutencoes_agendadas
@@ -2502,8 +2508,9 @@ def exibir_card_clicavel(
     valor: int,
     filtro: str,
     prefixo: str,
+    ajuda: str | None = None,
 ) -> None:
-    coluna.metric(titulo, valor)
+    coluna.metric(titulo, valor, help=ajuda)
 
     coluna.button(
         "🔎 Ver OS",
@@ -2525,35 +2532,65 @@ def exibir_cards_indicadores(
             "Manutenções agendadas",
             "Planejadas",
             "Manutenções agendadas",
+            (
+                "Total de manutenções reconhecidas na fotografia-base do "
+                "planejamento. É o denominador da MCI, do no-show e do "
+                "cancelamento."
+            ),
         ),
         (
             "Agendadas executadas",
             "Executadas planejadas",
             "Executada agendada",
+            (
+                "Manutenções concluídas que já faziam parte do "
+                "planejamento-base. Continuam separadas das extras para "
+                "mostrar a qualidade do agendamento."
+            ),
         ),
         (
             "Improdutivas",
             "Improdutivas",
             "Improdutivas",
+            (
+                "Total de atendimentos improdutivos: improdutivas agendadas "
+                "+ improdutivas extras. Entram no cálculo da MD."
+            ),
         ),
         (
             "Canceladas",
             "Canceladas",
             "Cancelada",
+            (
+                "Manutenções do planejamento-base classificadas como "
+                "canceladas. Índice de cancelamento = Canceladas ÷ "
+                "Manutenções agendadas × 100."
+            ),
         ),
         (
             "No-show",
             "No-show",
             "No-show",
+            (
+                "Manutenções do planejamento-base em que o atendimento não "
+                "ocorreu por no-show. Índice de no-show = No-show ÷ "
+                "Manutenções agendadas × 100."
+            ),
         ),
         (
             "Executadas extras",
             "Executadas extras",
             "Executada extra",
+            (
+                "Manutenções concluídas que não pertenciam ao "
+                "planejamento-base. Entram na MCI e na base da MD, mas "
+                "permanecem separadas para evidenciar encaixes e oportunidades "
+                "de melhoria do agendamento."
+            ),
         ),
     ]
 
-    for coluna, (rotulo, chave_indicador, filtro) in zip(
+    for coluna, (rotulo, chave_indicador, filtro, ajuda) in zip(
         colunas,
         configuracoes,
     ):
@@ -2563,6 +2600,7 @@ def exibir_cards_indicadores(
             indicadores[chave_indicador],
             filtro,
             prefixo,
+            ajuda,
         )
 
     st.markdown("#### Indicadores de desempenho")
@@ -2571,29 +2609,51 @@ def exibir_cards_indicadores(
     i1.metric(
         "MCI — Execução",
         f'{indicadores["MCI"]:.1f}%',
-        help="Agendadas executadas ÷ Manutenções agendadas. Meta: 90%.",
+        help=(
+            "Mede a execução total frente ao planejamento-base. "
+            "Fórmula: (Agendadas executadas + Executadas extras) ÷ "
+            "Manutenções agendadas × 100. As extras contam como execução, "
+            "mas continuam identificadas separadamente nos cards. "
+            "O indicador pode superar 100% quando a execução total for maior "
+            "que o volume originalmente agendado. Meta de referência: 90%."
+        ),
     )
     i2.metric(
         "MD — Improdutividade",
         f'{indicadores["MD"]:.1f}%',
         help=(
-            "Improdutivas totais ÷ "
-            "(Agendadas executadas + Executadas extras + "
-            "Improdutivas totais). Inclui improdutivas extras. "
-            "Meta: abaixo de 10%."
+            "Mede a participação das improdutivas entre os atendimentos "
+            "efetivamente trabalhados. Fórmula: Improdutivas totais ÷ "
+            "(Agendadas executadas + Executadas extras + Improdutivas totais) "
+            "× 100. Inclui improdutivas agendadas e extras. "
+            "Meta de referência: abaixo de 10%."
         ),
     )
     i3.metric(
         "Índice de no-show",
         f'{indicadores["Índice no-show"]:.1f}%',
+        help=(
+            "Percentual do planejamento-base perdido por no-show. "
+            "Fórmula: No-show ÷ Manutenções agendadas × 100."
+        ),
     )
     i4.metric(
         "Índice de cancelamento",
         f'{indicadores["Índice cancelamento"]:.1f}%',
+        help=(
+            "Percentual do planejamento-base que foi cancelado. "
+            "Fórmula: Canceladas ÷ Manutenções agendadas × 100."
+        ),
     )
     i5.metric(
         "Execução total",
         f'{indicadores["Execução total"]:.1f}%',
+        help=(
+            "Visão da execução total sobre o planejamento-base. "
+            "Fórmula: (Agendadas executadas + Executadas extras) ÷ "
+            "Manutenções agendadas × 100. Com a nova regra departamental, "
+            "este percentual usa a mesma base matemática da MCI."
+        ),
     )
 
 
@@ -4228,7 +4288,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.4.9 — Datas completas pela presença real no banco"
+        "Versão 2.5.0 — MCI total, MD padronizada e indicadores explicativos"
     )
 
 
@@ -5298,7 +5358,12 @@ elif pagina == "👤 Painel do Consultor":
     if not ranking.empty:
         ranking["MCI (%)"] = ranking.apply(
             lambda linha: (
-                linha["Executadas"] / linha["Planejadas"] * 100
+                (
+                    linha["Executadas"]
+                    + linha["Extras"]
+                )
+                / linha["Planejadas"]
+                * 100
                 if linha["Planejadas"]
                 else 0.0
             ),
@@ -5310,11 +5375,13 @@ elif pagina == "👤 Painel do Consultor":
                 linha["Improdutivas"]
                 / (
                     linha["Executadas"]
+                    + linha["Extras"]
                     + linha["Improdutivas"]
                 )
                 * 100
                 if (
                     linha["Executadas"]
+                    + linha["Extras"]
                     + linha["Improdutivas"]
                 )
                 else 0.0
