@@ -3640,6 +3640,343 @@ def exibir_cards_follow_acao(df: pd.DataFrame) -> None:
 # FOLLOW × RESULTADO OFS — COERÊNCIA E EFETIVIDADE
 # =========================================================
 
+
+def categorizar_motivo_md_dashboard(valor: str) -> str:
+    """Categoria executiva dos motivos de improdutividade, sem alterar a regra operacional."""
+    texto = normalizar_texto(valor)
+
+    if not texto:
+        return "Não informado"
+
+    if any(termo in texto for termo in [
+        "PROBLEMAS TECNICOS COM SISTEMAS",
+        "PROBLEMA TECNICO COM SISTEMA",
+        "SISTEMA",
+        "APLICATIVO",
+        "APP",
+        "VSERVICE",
+        "V SERVICES",
+    ]):
+        return "Problemas sistêmicos"
+
+    if any(termo in texto for termo in [
+        "PROBLEMAS TECNICOS COM VEICULOS",
+        "PROBLEMA TECNICO COM VEICULO",
+        "PROBLEMAS TECNICOS COM O VEICULO",
+    ]):
+        return "Problemas técnicos com veículos"
+
+    if any(termo in texto for termo in [
+        "CARRO INDISPONIVEL",
+        "VEICULO INDISPONIVEL",
+        "INDISPONIBILIDADE DO VEICULO",
+        "VEICULO NAO DISPONIVEL",
+        "CARRO NAO DISPONIVEL",
+    ]):
+        return "Veículo indisponível"
+
+    if any(termo in texto for termo in [
+        "PORTARIA",
+        "NAO LIBERADO",
+        "NAO FOI LIBERADO",
+        "ACESSO",
+    ]):
+        return "Portaria / acesso"
+
+    if any(termo in texto for termo in [
+        "EQUIPAMENTO",
+        "FERRAMENTA",
+        "MATERIAL",
+        "PECA",
+        "INSUMO",
+        "CABO",
+        "CHICOTE",
+    ]):
+        return "Equipamento / material"
+
+    if any(termo in texto for termo in [
+        "TECNICO",
+        "EQUIPE",
+        "CAPACIDADE",
+        "MAO DE OBRA",
+    ]):
+        return "Técnico / capacidade"
+
+    if any(termo in texto for termo in [
+        "CLIENTE",
+        "SOLICITOU",
+        "AGENDAMENTO",
+        "DESAGEND",
+    ]):
+        return "Cliente / agendamento"
+
+    if "SINISTRO" in texto or "ACIDENT" in texto:
+        return "Sinistro"
+
+    valor_limpo = texto_limpo(valor)
+    return valor_limpo if valor_limpo else "Outro"
+
+
+def preparar_diagnostico_md(base: pd.DataFrame) -> pd.DataFrame:
+    if base.empty:
+        return pd.DataFrame()
+
+    improdutivas = base[
+        base["Classificação"].isin([
+            "Improdutiva agendada",
+            "Improdutiva extra",
+        ])
+    ].copy()
+
+    if improdutivas.empty:
+        return improdutivas
+
+    if "Consultor" not in improdutivas.columns:
+        improdutivas["Consultor"] = "Não definido"
+
+    improdutivas["Região"] = improdutivas["Consultor"].map(
+        REGIOES_CONSULTORES
+    ).fillna("Não definida")
+
+    if "Razao_improdutiva" not in improdutivas.columns:
+        improdutivas["Razao_improdutiva"] = ""
+
+    improdutivas["Motivo MD"] = improdutivas[
+        "Razao_improdutiva"
+    ].apply(categorizar_motivo_md_dashboard)
+
+    return improdutivas
+
+
+def resumo_motivos_md(improdutivas: pd.DataFrame) -> pd.DataFrame:
+    if improdutivas.empty:
+        return pd.DataFrame(columns=[
+            "Motivo", "Quantidade", "% das improdutivas"
+        ])
+
+    resumo = (
+        improdutivas["Motivo MD"]
+        .fillna("Não informado")
+        .replace("", "Não informado")
+        .value_counts()
+        .rename_axis("Motivo")
+        .reset_index(name="Quantidade")
+    )
+
+    total = int(resumo["Quantidade"].sum())
+    resumo["% das improdutivas"] = (
+        resumo["Quantidade"] / total * 100 if total else 0.0
+    )
+    return resumo
+
+
+def ranking_md_dimensao(base: pd.DataFrame, dimensao: str, minimo_base_md: int = 1) -> pd.DataFrame:
+    if base.empty or dimensao not in base.columns:
+        return pd.DataFrame()
+
+    linhas = []
+    for valor, grupo in base.groupby(dimensao, dropna=False):
+        nome = texto_limpo(valor) or "Não definido"
+        indicadores = calcular_indicadores(grupo)
+        executadas = indicadores["Executadas planejadas"] + indicadores["Executadas extras"]
+        improdutivas = indicadores["Improdutivas"]
+        base_md = executadas + improdutivas
+
+        if base_md < minimo_base_md:
+            continue
+
+        imp_grupo = preparar_diagnostico_md(grupo)
+        motivos = resumo_motivos_md(imp_grupo)
+        if motivos.empty:
+            principal_motivo = "Sem improdutivas"
+            perc_motivo = 0.0
+        else:
+            principal_motivo = str(motivos.iloc[0]["Motivo"])
+            perc_motivo = float(motivos.iloc[0]["% das improdutivas"])
+
+        linha = {
+            dimensao: nome,
+            "Executadas": executadas,
+            "Improdutivas": improdutivas,
+            "Base MD": base_md,
+            "MD (%)": indicadores["MD"],
+            "Principal motivo": principal_motivo,
+            "% motivo": perc_motivo,
+        }
+
+        if dimensao == "Oficina":
+            consultores = grupo["Consultor"].dropna().astype(str).map(texto_limpo)
+            consultores = consultores[consultores != ""]
+            consultor = consultores.mode().iloc[0] if not consultores.empty else "Não definido"
+            linha["Consultor"] = consultor
+            linha["Região"] = REGIOES_CONSULTORES.get(consultor, "Não definida")
+
+        linhas.append(linha)
+
+    if not linhas:
+        return pd.DataFrame()
+
+    return pd.DataFrame(linhas).sort_values(
+        ["MD (%)", "Improdutivas", "Base MD"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
+
+
+def exibir_diagnostico_md_semanal(base_semana: pd.DataFrame, inicio_semana, fim_semana) -> None:
+    st.markdown("### 🧭 MD — Diagnóstico da semana")
+    st.caption(
+        "Leitura executiva da improdutividade: percentual geral, "
+        "principais motivos e concentração por região e oficina. "
+        "Canceladas e no-show não entram na MD."
+    )
+
+    indicadores = calcular_indicadores(base_semana)
+    improdutivas = preparar_diagnostico_md(base_semana)
+    motivos = resumo_motivos_md(improdutivas)
+
+    if motivos.empty:
+        principal_motivo = "Sem improdutivas"
+        principal_qtd = 0
+        principal_perc = 0.0
+    else:
+        principal_motivo = str(motivos.iloc[0]["Motivo"])
+        principal_qtd = int(motivos.iloc[0]["Quantidade"])
+        principal_perc = float(motivos.iloc[0]["% das improdutivas"])
+
+    base_regiao = base_semana.copy()
+    if "Consultor" not in base_regiao.columns:
+        base_regiao["Consultor"] = "Não definido"
+    base_regiao["Região"] = base_regiao["Consultor"].map(
+        REGIOES_CONSULTORES
+    ).fillna("Não definida")
+
+    ranking_regiao = ranking_md_dimensao(base_regiao, "Região", minimo_base_md=1)
+    ranking_oficina = ranking_md_dimensao(base_semana, "Oficina", minimo_base_md=3)
+    if ranking_oficina.empty:
+        ranking_oficina = ranking_md_dimensao(base_semana, "Oficina", minimo_base_md=1)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "MD geral",
+        f'{indicadores["MD"]:.1f}%',
+        help=(
+            "Improdutivas totais ÷ (Executadas agendadas + "
+            "Executadas extras + Improdutivas totais) × 100."
+        ),
+    )
+    c2.metric(
+        "Principal motivo",
+        principal_motivo,
+        delta=(f"{principal_perc:.1f}% das improdutivas" if principal_qtd else None),
+        help=(
+            "Participação do motivo dentro do total de improdutivas da semana. "
+            "Não é a própria MD."
+        ),
+    )
+
+    if ranking_regiao.empty:
+        c3.metric("Região com maior MD", "Sem dados")
+    else:
+        reg = ranking_regiao.iloc[0]
+        c3.metric(
+            "Região com maior MD",
+            str(reg["Região"]),
+            delta=f'{reg["MD (%)"]:.1f}%',
+            help=(
+                "Região com maior taxa MD na semana, calculada sobre "
+                "executadas + improdutivas da própria região."
+            ),
+        )
+
+    if ranking_oficina.empty:
+        c4.metric("Oficina com maior MD", "Sem dados")
+    else:
+        of = ranking_oficina.iloc[0]
+        c4.metric(
+            "Oficina com maior MD",
+            str(of["Oficina"]),
+            delta=f'{of["MD (%)"]:.1f}%',
+            help=(
+                "Oficina com maior taxa MD. Quando possível, o ranking "
+                "considera somente oficinas com pelo menos 3 atendimentos "
+                "na base MD, evitando distorção por um único caso."
+            ),
+        )
+
+    st.markdown("#### Conexão do principal desvio")
+    conexoes = []
+    if not ranking_regiao.empty:
+        reg = ranking_regiao.iloc[0]
+        conexoes.append({
+            "Nível": "Região crítica",
+            "Nome": reg["Região"],
+            "MD": f'{reg["MD (%)"]:.1f}%',
+            "Principal motivo": reg["Principal motivo"],
+            "% do motivo nas improdutivas": f'{reg["% motivo"]:.1f}%',
+            "Mesmo motivo do Brasil?": "Sim" if reg["Principal motivo"] == principal_motivo else "Não",
+        })
+    if not ranking_oficina.empty:
+        of = ranking_oficina.iloc[0]
+        conexoes.append({
+            "Nível": "Oficina crítica",
+            "Nome": of["Oficina"],
+            "MD": f'{of["MD (%)"]:.1f}%',
+            "Principal motivo": of["Principal motivo"],
+            "% do motivo nas improdutivas": f'{of["% motivo"]:.1f}%',
+            "Mesmo motivo do Brasil?": "Sim" if of["Principal motivo"] == principal_motivo else "Não",
+        })
+    if conexoes:
+        st.dataframe(pd.DataFrame(conexoes), use_container_width=True, hide_index=True)
+
+    e1, e2 = st.columns(2)
+    with e1:
+        st.markdown("#### Top motivos de improdutividade")
+        if motivos.empty:
+            st.info("Sem improdutivas na semana selecionada.")
+        else:
+            top_motivos = motivos.head(8).copy()
+            top_motivos["% das improdutivas"] = top_motivos["% das improdutivas"].map(lambda v: f"{v:.1f}%")
+            st.dataframe(top_motivos, use_container_width=True, hide_index=True)
+
+    with e2:
+        st.markdown("#### Ranking de regiões por MD")
+        if ranking_regiao.empty:
+            st.info("Sem dados regionais suficientes.")
+        else:
+            exibir_regioes = ranking_regiao.head(8).copy()
+            exibir_regioes["MD (%)"] = exibir_regioes["MD (%)"].map(lambda v: f"{v:.1f}%")
+            exibir_regioes["% motivo"] = exibir_regioes["% motivo"].map(lambda v: f"{v:.1f}%")
+            st.dataframe(
+                exibir_regioes[[
+                    "Região", "Executadas", "Improdutivas", "Base MD",
+                    "MD (%)", "Principal motivo", "% motivo",
+                ]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    st.markdown("#### Ranking nacional de oficinas por MD")
+    if ranking_oficina.empty:
+        st.info("Sem dados de oficina suficientes.")
+    else:
+        exibir_oficinas = ranking_oficina.head(10).copy()
+        exibir_oficinas["MD (%)"] = exibir_oficinas["MD (%)"].map(lambda v: f"{v:.1f}%")
+        exibir_oficinas["% motivo"] = exibir_oficinas["% motivo"].map(lambda v: f"{v:.1f}%")
+        st.dataframe(
+            exibir_oficinas[[
+                "Oficina", "Consultor", "Região", "Executadas",
+                "Improdutivas", "Base MD", "MD (%)", "Principal motivo", "% motivo",
+            ]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.caption(
+        "Este bloco é diagnóstico. A definição de quando abrir ação/QPI "
+        "e como registrar tratativas será validada com o time."
+    )
+
+
 def categorizar_motivo_ofs(valor: str) -> str:
     texto = normalizar_texto(valor)
 
@@ -4288,7 +4625,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.5.0 — MCI total, MD padronizada e indicadores explicativos"
+        "Versão 2.5.1 — Diagnóstico semanal MD por motivo, região e oficina"
     )
 
 
@@ -4770,6 +5107,13 @@ elif pagina == "📊 Dashboard Executivo":
                 "a "
                 f"{fim_sel.strftime('%d/%m/%Y')}"
             ),
+        )
+
+        st.divider()
+        exibir_diagnostico_md_semanal(
+            base_semana_sel,
+            inicio_sel,
+            fim_sel,
         )
     else:
         st.info(
