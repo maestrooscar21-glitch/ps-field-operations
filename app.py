@@ -1329,6 +1329,311 @@ def enriquecer_com_cadastro(
     return resultado
 
 
+
+# =========================================================
+# PRÉ-AGENDA / ACEITE E ALOCAÇÃO
+# =========================================================
+
+def valor_booleano_ofs(valor) -> bool:
+    texto = normalizar_texto(valor)
+    return texto in {
+        "SIM", "S", "TRUE", "1", "YES", "REJEITADA", "REJEITADO"
+    }
+
+
+def classificar_pre_agenda(linha: pd.Series) -> str:
+    """
+    Regra preventiva:
+    - motivo/flag de rejeição => Rejeitada pela oficina;
+    - recurso vazio ou igual à oficina => Sem técnico / requer alocação;
+    - recurso diferente da oficina => Atribuída ao técnico;
+    - dados insuficientes => A validar.
+    """
+    oficina = texto_limpo(linha.get("Oficina", ""))
+    recurso = texto_limpo(linha.get("Recurso", ""))
+    motivo_rejeicao = texto_limpo(
+        linha.get("Motivos de Rejeição da OS", "")
+    )
+    flag_rejeitada = linha.get("Flag OS Rejeitada", "")
+
+    if motivo_rejeicao or valor_booleano_ofs(flag_rejeitada):
+        return "Rejeitada pela oficina"
+
+    if not oficina:
+        return "A validar"
+
+    if not recurso:
+        return "Sem técnico / requer alocação"
+
+    if normalizar_texto(recurso) == normalizar_texto(oficina):
+        return "Sem técnico / requer alocação"
+
+    return "Atribuída ao técnico"
+
+
+def preparar_pre_agenda_para_banco(
+    df: pd.DataFrame,
+    nome_arquivo: str,
+    importacao_id: str,
+    importado_em: str,
+) -> list[dict]:
+    """
+    Prepara uma fotografia independente do processo de aceite/alocação.
+    Não altera atividades_planejadas nem planejamento_base.
+    """
+    base = filtrar_somente_manutencoes(df).copy()
+
+    colunas_obrigatorias = ["OS", "Oficina", "Recurso"]
+    faltantes = [
+        coluna
+        for coluna in colunas_obrigatorias
+        if coluna not in base.columns
+    ]
+    if faltantes:
+        raise ValueError(
+            "O arquivo de pré-agenda não possui as colunas obrigatórias: "
+            + ", ".join(faltantes)
+        )
+
+    # As colunas abaixo podem existir vazias no OFS.
+    for coluna in [
+        "Data",
+        "Ticket Jira",
+        "Placa",
+        "Status da Atividade",
+        "Tipo de Atividade",
+        "Aceite OS",
+        "Flag OS Rejeitada",
+        "Motivos de Rejeição da OS",
+    ]:
+        if coluna not in base.columns:
+            base[coluna] = ""
+
+    base = criar_chaves(base)
+    base = base.drop_duplicates(
+        subset=["Chave Atendimento"],
+        keep="last",
+    )
+
+    registros = []
+
+    for _, linha in base.iterrows():
+        data_operacional = converter_data_operacional(
+            linha.get("Data", "")
+        )
+
+        dados = {
+            str(coluna): texto_limpo(valor)
+            for coluna, valor in linha.items()
+            if coluna not in {
+                "Chave Ticket",
+                "Chave Placa",
+                "Chave OS",
+                "Chave Atendimento",
+            }
+        }
+
+        registros.append(
+            {
+                "importacao_id": importacao_id,
+                "importado_em": importado_em,
+                "nome_arquivo": nome_arquivo,
+                "data_operacional": data_operacional,
+                "chave_atendimento": texto_limpo(
+                    linha.get("Chave Atendimento", "")
+                ),
+                "ticket_jira": texto_limpo(
+                    linha.get("Ticket Jira", "")
+                ),
+                "os": texto_limpo(linha.get("OS", "")),
+                "placa": texto_limpo(linha.get("Placa", "")),
+                "oficina": texto_limpo(linha.get("Oficina", "")),
+                "recurso": texto_limpo(linha.get("Recurso", "")),
+                "status_atividade": texto_limpo(
+                    linha.get("Status da Atividade", "")
+                ),
+                "tipo_atividade": texto_limpo(
+                    linha.get("Tipo de Atividade", "")
+                ),
+                "aceite_os": texto_limpo(
+                    linha.get("Aceite OS", "")
+                ),
+                "flag_os_rejeitada": texto_limpo(
+                    linha.get("Flag OS Rejeitada", "")
+                ),
+                "motivo_rejeicao": texto_limpo(
+                    linha.get("Motivos de Rejeição da OS", "")
+                ),
+                "situacao_pre_agenda": classificar_pre_agenda(linha),
+                "dados": dados,
+            }
+        )
+
+    return registros
+
+
+def salvar_pre_agenda(
+    nome_arquivo: str,
+    df: pd.DataFrame,
+) -> tuple[str, int]:
+    """
+    Salva uma fotografia append-only.
+    O painel usa a fotografia mais recente, preservando as anteriores
+    para futura auditoria/evolução.
+    """
+    importacao_id = str(uuid.uuid4())
+    importado_em = datetime.now(FUSO_BRASIL).isoformat()
+
+    registros = preparar_pre_agenda_para_banco(
+        df,
+        nome_arquivo,
+        importacao_id,
+        importado_em,
+    )
+
+    if not registros:
+        raise ValueError(
+            "Nenhuma manutenção encontrada no arquivo de pré-agenda."
+        )
+
+    inserir_em_lotes(
+        "pre_agenda_aceite",
+        registros,
+    )
+
+    invalidar_cache_dados()
+    return importacao_id, len(registros)
+
+
+@st.cache_data(ttl=CACHE_TTL_SEGUNDOS, show_spinner=False)
+def carregar_pre_agenda_mais_recente() -> pd.DataFrame:
+    registros = buscar_todos(
+        "pre_agenda_aceite",
+        ordem="importado_em",
+        desc=True,
+    )
+
+    if not registros:
+        return pd.DataFrame()
+
+    mais_recente = registros[0]
+    importacao_id = texto_limpo(
+        mais_recente.get("importacao_id", "")
+    )
+
+    if not importacao_id:
+        return pd.DataFrame()
+
+    fotografia = [
+        registro
+        for registro in registros
+        if texto_limpo(registro.get("importacao_id", ""))
+        == importacao_id
+    ]
+
+    base = pd.DataFrame(fotografia)
+
+    if base.empty:
+        return base
+
+    renomear = {
+        "data_operacional": "Data operacional",
+        "ticket_jira": "Ticket Jira",
+        "os": "OS",
+        "placa": "Placa",
+        "oficina": "Oficina",
+        "recurso": "Recurso",
+        "status_atividade": "Status",
+        "aceite_os": "Aceite OS",
+        "flag_os_rejeitada": "Flag rejeitada",
+        "motivo_rejeicao": "Motivo rejeição",
+        "situacao_pre_agenda": "Situação",
+        "nome_arquivo": "Arquivo",
+        "importado_em": "Importado em",
+    }
+    base = base.rename(columns=renomear)
+
+    return base
+
+
+def enriquecer_pre_agenda_com_cadastro(
+    base: pd.DataFrame,
+    cadastro: pd.DataFrame,
+) -> pd.DataFrame:
+    resultado = base.copy()
+
+    if resultado.empty:
+        return resultado
+
+    resultado["Chave Oficina"] = resultado["Oficina"].apply(
+        normalizar_texto
+    )
+
+    if cadastro.empty:
+        resultado["Consultor"] = "Não definido"
+        resultado["Região"] = "Não definida"
+        return resultado
+
+    apoio = cadastro.copy()
+    if "Chave Oficina" not in apoio.columns:
+        apoio["Chave Oficina"] = apoio["Oficina"].apply(
+            normalizar_texto
+        )
+
+    colunas = [
+        coluna
+        for coluna in [
+            "Chave Oficina",
+            "Consultor",
+            "UF-base",
+            "Cidade-base",
+        ]
+        if coluna in apoio.columns
+    ]
+
+    resultado = resultado.merge(
+        apoio[colunas].drop_duplicates(
+            subset=["Chave Oficina"]
+        ),
+        on="Chave Oficina",
+        how="left",
+    )
+
+    resultado["Consultor"] = resultado.get(
+        "Consultor",
+        pd.Series(index=resultado.index, dtype=str),
+    ).fillna("Não definido")
+
+    resultado["Região"] = resultado["Consultor"].map(
+        REGIOES_CONSULTORES
+    ).fillna("Não definida")
+
+    return resultado
+
+
+def prioridade_pre_agenda(data_operacional) -> tuple[str, int | None]:
+    data = pd.to_datetime(
+        data_operacional,
+        errors="coerce",
+    )
+    if pd.isna(data):
+        return "⚪ Data inválida", None
+
+    hoje = datetime.now(FUSO_BRASIL).date()
+    diferenca = (data.date() - hoje).days
+
+    if diferenca < 0:
+        return "⚫ Vencida", diferenca
+    if diferenca == 0:
+        return "🔴 D0 — Urgente", diferenca
+    if diferenca == 1:
+        return "🔴 D+1 — Crítico", diferenca
+    if diferenca == 2:
+        return "🟠 D+2 — Atenção", diferenca
+
+    return f"⚪ D+{diferenca}", diferenca
+
+
 # =========================================================
 # PERSISTÊNCIA
 # =========================================================
@@ -4633,6 +4938,7 @@ with st.sidebar:
                 "Executivo",
                 "Consultor",
                 "Improdutividade",
+                "Pré-agenda",
             ],
             key="nav_dashboard",
         )
@@ -4641,6 +4947,7 @@ with st.sidebar:
             "Executivo": "📊 Dashboard Executivo",
             "Consultor": "👤 Painel do Consultor",
             "Improdutividade": "📉 Dashboard de Improdutividade",
+            "Pré-agenda": "🛰️ Controle Pré-Agenda",
         }[subarea]
 
     elif area == "📞 Follow":
@@ -4680,7 +4987,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.5.3 — Executivo enxuto e rankings MD na improdutividade"
+        "Versão 2.6.0 — Controle Pré-Agenda, aceite e alocação"
     )
 
 
@@ -4697,8 +5004,13 @@ if pagina == "📥 Importações":
         "tipo e data, ela será substituída."
     )
 
-    aba_oficinas, aba_planejado, aba_resultado = st.tabs(
-        ["🏢 Oficinas", "📅 Planejado", "📈 Resultado"]
+    aba_oficinas, aba_planejado, aba_resultado, aba_pre_agenda = st.tabs(
+        [
+            "🏢 Oficinas",
+            "📅 Planejado",
+            "📈 Resultado",
+            "🛰️ Pré-agenda / Aceite",
+        ]
     )
 
     with aba_oficinas:
@@ -4842,6 +5154,94 @@ if pagina == "📥 Importações":
 
             except Exception as erro:
                 st.error(f"Erro no resultado: {erro}")
+
+
+    with aba_pre_agenda:
+        st.markdown("### Controle Pré-Agenda — Aceite e Alocação")
+        st.caption(
+            "Importe o relatório do OFS usado para acompanhar aceite/alocação. "
+            "Esta base é independente do Planejado e não altera MCI, MD ou "
+            "planejamento_base."
+        )
+
+        arquivo_pre = st.file_uploader(
+            "CSV de pré-agenda / pendentes de aceite",
+            type=["csv"],
+            key="pre_agenda_upload",
+        )
+
+        if arquivo_pre is not None:
+            try:
+                df_pre = ler_csv_ofs(arquivo_pre)
+                preview_pre = filtrar_somente_manutencoes(
+                    df_pre
+                ).copy()
+
+                for coluna in [
+                    "Motivos de Rejeição da OS",
+                    "Flag OS Rejeitada",
+                    "Aceite OS",
+                ]:
+                    if coluna not in preview_pre.columns:
+                        preview_pre[coluna] = ""
+
+                preview_pre["Situação"] = preview_pre.apply(
+                    classificar_pre_agenda,
+                    axis=1,
+                )
+
+                resumo_pre = (
+                    preview_pre["Situação"]
+                    .value_counts()
+                    .rename_axis("Situação")
+                    .reset_index(name="Quantidade")
+                )
+
+                st.write(
+                    f"Manutenções identificadas: **{len(preview_pre)}**"
+                )
+                st.dataframe(
+                    resumo_pre,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                colunas_preview = [
+                    coluna
+                    for coluna in [
+                        "Data",
+                        "OS",
+                        "Oficina",
+                        "Recurso",
+                        "Status da Atividade",
+                        "Motivos de Rejeição da OS",
+                        "Situação",
+                    ]
+                    if coluna in preview_pre.columns
+                ]
+
+                st.dataframe(
+                    preview_pre[colunas_preview].head(100),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                if st.button(
+                    "💾 Salvar fotografia de pré-agenda",
+                    type="primary",
+                    key="salvar_pre_agenda",
+                ):
+                    _, quantidade = salvar_pre_agenda(
+                        arquivo_pre.name,
+                        df_pre,
+                    )
+                    st.success(
+                        f"Fotografia salva: {quantidade} manutenção(ões)."
+                    )
+                    st.rerun()
+
+            except Exception as erro:
+                st.error(f"Erro na pré-agenda: {erro}")
 
 
 # =========================================================
@@ -5936,6 +6336,314 @@ elif pagina == "🏆 Ranking por Consultor":
 # =========================================================
 # FOLLOW
 # =========================================================
+
+
+elif pagina == "🛰️ Controle Pré-Agenda":
+    exigir_supabase()
+
+    st.subheader("🛰️ Controle Pré-Agenda")
+    st.caption(
+        "Radar preventivo para evitar que OS cheguem ao dia da manutenção "
+        "sem técnico atribuído. Prioridade operacional: D+1 e D+2."
+    )
+
+    fotografia = carregar_pre_agenda_mais_recente()
+
+    if fotografia.empty:
+        st.info(
+            "Ainda não existe fotografia de pré-agenda. "
+            "Importe o CSV em Dados → Importações → Pré-agenda / Aceite."
+        )
+        st.stop()
+
+    cadastro = carregar_oficinas()
+    fotografia = enriquecer_pre_agenda_com_cadastro(
+        fotografia,
+        cadastro,
+    )
+
+    fotografia["Data_dt"] = pd.to_datetime(
+        fotografia["Data operacional"],
+        errors="coerce",
+    )
+
+    prioridades = fotografia["Data operacional"].apply(
+        prioridade_pre_agenda
+    )
+    fotografia["Prioridade"] = prioridades.apply(
+        lambda item: item[0]
+    )
+    fotografia["Dias para agenda"] = prioridades.apply(
+        lambda item: item[1]
+    )
+
+    arquivo_atual = texto_limpo(
+        fotografia.iloc[0].get("Arquivo", "")
+    )
+    importado_em = pd.to_datetime(
+        fotografia.iloc[0].get("Importado em", ""),
+        errors="coerce",
+    )
+
+    if pd.notna(importado_em):
+        importado_txt = importado_em.strftime(
+            "%d/%m/%Y %H:%M"
+        )
+    else:
+        importado_txt = "não identificado"
+
+    st.info(
+        f"Fotografia atual: **{arquivo_atual}** · "
+        f"importada em **{importado_txt}**"
+    )
+
+    # -----------------------------
+    # Cards
+    # -----------------------------
+    total = len(fotografia)
+    atribuida = int(
+        (fotografia["Situação"] == "Atribuída ao técnico").sum()
+    )
+    rejeitada = int(
+        (fotografia["Situação"] == "Rejeitada pela oficina").sum()
+    )
+    sem_tecnico = int(
+        (
+            fotografia["Situação"]
+            == "Sem técnico / requer alocação"
+        ).sum()
+    )
+    validar = int(
+        (fotografia["Situação"] == "A validar").sum()
+    )
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("OS na fotografia", total)
+    c2.metric("🟢 Atribuídas", atribuida)
+    c3.metric("🔴 Rejeitadas", rejeitada)
+    c4.metric("🟠 Sem técnico", sem_tecnico)
+    c5.metric("⚪ A validar", validar)
+
+    # -----------------------------
+    # Filtros
+    # -----------------------------
+    st.markdown("### Filtros")
+    f1, f2, f3 = st.columns(3)
+
+    consultores = sorted(
+        {
+            texto_limpo(v)
+            for v in fotografia["Consultor"]
+            if texto_limpo(v)
+        }
+    )
+    oficinas = sorted(
+        {
+            texto_limpo(v)
+            for v in fotografia["Oficina"]
+            if texto_limpo(v)
+        }
+    )
+    situacoes = sorted(
+        {
+            texto_limpo(v)
+            for v in fotografia["Situação"]
+            if texto_limpo(v)
+        }
+    )
+
+    with f1:
+        consultor_sel = multiselect_persistente(
+            "Consultor",
+            consultores,
+            key="pre_agenda_consultor",
+        )
+
+    with f2:
+        oficina_sel = multiselect_persistente(
+            "Oficina",
+            oficinas,
+            key="pre_agenda_oficina",
+        )
+
+    with f3:
+        situacao_sel = multiselect_persistente(
+            "Situação",
+            situacoes,
+            key="pre_agenda_situacao",
+        )
+
+    filtrada = fotografia.copy()
+
+    if consultor_sel:
+        filtrada = filtrada[
+            filtrada["Consultor"].isin(consultor_sel)
+        ].copy()
+
+    if oficina_sel:
+        filtrada = filtrada[
+            filtrada["Oficina"].isin(oficina_sel)
+        ].copy()
+
+    if situacao_sel:
+        filtrada = filtrada[
+            filtrada["Situação"].isin(situacao_sel)
+        ].copy()
+
+    # -----------------------------
+    # Radar preventivo
+    # -----------------------------
+    st.divider()
+    st.markdown("### 🚨 Radar preventivo")
+
+    d1 = filtrada[
+        (filtrada["Dias para agenda"] == 1)
+        & (
+            filtrada["Situação"].isin(
+                [
+                    "Sem técnico / requer alocação",
+                    "Rejeitada pela oficina",
+                    "A validar",
+                ]
+            )
+        )
+    ].copy()
+
+    d2 = filtrada[
+        (filtrada["Dias para agenda"] == 2)
+        & (
+            filtrada["Situação"].isin(
+                [
+                    "Sem técnico / requer alocação",
+                    "Rejeitada pela oficina",
+                    "A validar",
+                ]
+            )
+        )
+    ].copy()
+
+    d0 = filtrada[
+        (filtrada["Dias para agenda"] <= 0)
+        & (
+            filtrada["Situação"].isin(
+                [
+                    "Sem técnico / requer alocação",
+                    "Rejeitada pela oficina",
+                    "A validar",
+                ]
+            )
+        )
+    ].copy()
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric(
+        "🔴 D+1 — tratar hoje",
+        len(d1),
+        help=(
+            "OS de amanhã que ainda estão rejeitadas, sem técnico "
+            "ou precisam de validação."
+        ),
+    )
+    r2.metric(
+        "🟠 D+2 — atenção",
+        len(d2),
+        help=(
+            "OS de depois de amanhã que ainda precisam de ação preventiva."
+        ),
+    )
+    r3.metric(
+        "⚫ D0/vencidas",
+        len(d0),
+        help=(
+            "Casos que chegaram ao dia da agenda ou passaram dele "
+            "sem resolução preventiva."
+        ),
+    )
+
+    colunas_fila = [
+        coluna
+        for coluna in [
+            "Prioridade",
+            "Data operacional",
+            "OS",
+            "Oficina",
+            "Consultor",
+            "Região",
+            "Recurso",
+            "Situação",
+            "Motivo rejeição",
+            "Status",
+        ]
+        if coluna in filtrada.columns
+    ]
+
+    st.markdown("#### 🔴 Fila D+1 — ação hoje")
+    if d1.empty:
+        st.success("Nenhuma pendência crítica para amanhã.")
+    else:
+        st.dataframe(
+            d1[colunas_fila].sort_values(
+                ["Oficina", "OS"]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("#### 🟠 Fila D+2 — antecipar tratativa")
+    if d2.empty:
+        st.success("Nenhuma pendência para D+2.")
+    else:
+        st.dataframe(
+            d2[colunas_fila].sort_values(
+                ["Oficina", "OS"]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.divider()
+    st.markdown("### Visão completa da fotografia")
+
+    abas = st.tabs(
+        [
+            "🟠 Sem técnico",
+            "🔴 Rejeitadas",
+            "🟢 Atribuídas",
+            "⚪ A validar",
+            "📋 Todas",
+        ]
+    )
+
+    grupos_situacao = [
+        "Sem técnico / requer alocação",
+        "Rejeitada pela oficina",
+        "Atribuída ao técnico",
+        "A validar",
+        None,
+    ]
+
+    for aba, situacao in zip(
+        abas,
+        grupos_situacao,
+    ):
+        with aba:
+            if situacao is None:
+                grupo = filtrada.copy()
+            else:
+                grupo = filtrada[
+                    filtrada["Situação"] == situacao
+                ].copy()
+
+            if grupo.empty:
+                st.info("Nenhuma OS nesta categoria.")
+            else:
+                st.dataframe(
+                    grupo[colunas_fila].sort_values(
+                        ["Data operacional", "Oficina", "OS"]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
 elif pagina == "📉 Dashboard de Improdutividade":
     exigir_supabase()
