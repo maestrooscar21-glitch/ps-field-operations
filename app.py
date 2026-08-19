@@ -1151,11 +1151,68 @@ def conciliar_bases(
     return conciliacao
 
 
+
+# =========================================================
+# REGRA DE EXPURGO MCI / MD — vigente a partir de 19/08/2026
+# Aplicada retroativamente a todo o histórico já armazenado.
+# As OS continuam classificadas e visíveis no painel de improdutividade.
+# =========================================================
+
+def motivo_expurgado_mci_md(valor) -> bool:
+    texto = normalizar_texto(valor)
+
+    if not texto:
+        return False
+
+    motivos_expurgados = [
+        "PROBLEMAS TECNICOS COM SISTEMAS",
+        "PROBLEMA TECNICO COM SISTEMA",
+        "PROBLEMAS TECNICOS EM SISTEMAS",
+        "PROBLEMA TECNICO EM SISTEMA",
+        "PROBLEMAS TECNICOS COM VEICULOS",
+        "PROBLEMA TECNICO COM VEICULO",
+        "PROBLEMAS TECNICOS COM O VEICULO",
+        "PROBLEMAS TECNICOS EM VEICULOS",
+        "PROBLEMA TECNICO EM VEICULO",
+    ]
+
+    return any(
+        motivo in texto
+        for motivo in motivos_expurgados
+    )
+
+
+def mascara_improdutiva_expurgada(
+    base: pd.DataFrame,
+) -> pd.Series:
+    if base is None or base.empty:
+        return pd.Series(dtype=bool)
+
+    if "Razao_improdutiva" not in base.columns:
+        motivos = pd.Series(
+            "",
+            index=base.index,
+            dtype=str,
+        )
+    else:
+        motivos = base["Razao_improdutiva"].fillna("")
+
+    mascara_improdutiva = base["Classificação"].isin(
+        [
+            "Improdutiva agendada",
+            "Improdutiva extra",
+        ]
+    )
+
+    return (
+        mascara_improdutiva
+        & motivos.apply(motivo_expurgado_mci_md)
+    )
+
+
 def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
-    # Fonte de verdade do denominador:
+    # Fonte de verdade do denominador original:
     # toda OS reconhecida como parte da fotografia-base do planejamento.
-    # O destino posterior (executada, cancelada, retirada, no-show etc.)
-    # não deve diminuir o total originalmente planejado.
     if "Origem Agendamento" in conciliacao.columns:
         manutencoes_agendadas = int(
             (
@@ -1164,7 +1221,6 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
             ).sum()
         )
     else:
-        # Compatibilidade defensiva com históricos muito antigos.
         agendadas_validas = {
             "Executada agendada",
             "Improdutiva agendada",
@@ -1209,23 +1265,67 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         ).sum()
     )
 
-    improdutivas = (
+    improdutivas_totais = (
         improdutivas_agendadas
         + improdutivas_extras
     )
 
+    mascara_expurgada = mascara_improdutiva_expurgada(
+        conciliacao
+    )
+
+    improdutivas_expurgadas = int(
+        mascara_expurgada.sum()
+    )
+
+    improdutivas_expurgadas_agendadas = int(
+        (
+            mascara_expurgada
+            & (
+                conciliacao["Classificação"]
+                == "Improdutiva agendada"
+            )
+        ).sum()
+    )
+
+    improdutivas_expurgadas_extras = int(
+        (
+            mascara_expurgada
+            & (
+                conciliacao["Classificação"]
+                == "Improdutiva extra"
+            )
+        ).sum()
+    )
+
+    improdutivas_consideradas = max(
+        improdutivas_totais
+        - improdutivas_expurgadas,
+        0,
+    )
+
+    # Para a MCI, uma improdutiva agendada expurgada deixa de
+    # penalizar o denominador do indicador.
+    planejadas_elegiveis_mci = max(
+        manutencoes_agendadas
+        - improdutivas_expurgadas_agendadas,
+        0,
+    )
+
     canceladas = int(
-        (conciliacao["Classificação"] == "Cancelada").sum()
+        (
+            conciliacao["Classificação"]
+            == "Cancelada"
+        ).sum()
     )
 
     no_show = int(
-        (conciliacao["Classificação"] == "No-show").sum()
+        (
+            conciliacao["Classificação"]
+            == "No-show"
+        ).sum()
     )
 
-    # MCI departamental:
-    # considera toda manutenção efetivamente concluída, independentemente
-    # de ter sido agendada ou extra. A separação entre agendada e extra
-    # continua preservada nos cards para transparência operacional.
     total_executadas = (
         agendadas_executadas
         + executadas_extras
@@ -1233,30 +1333,39 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
 
     mci = (
         total_executadas
-        / manutencoes_agendadas
+        / planejadas_elegiveis_mci
         * 100
-        if manutencoes_agendadas
+        if planejadas_elegiveis_mci
         else 0.0
     )
 
+    # MD: as duas causas expurgadas não entram nem no numerador
+    # nem no denominador da medida.
     base_md = (
-        agendadas_executadas
-        + executadas_extras
-        + improdutivas
+        total_executadas
+        + improdutivas_consideradas
     )
 
     md = (
-        improdutivas / base_md * 100
+        improdutivas_consideradas
+        / base_md
+        * 100
         if base_md
         else 0.0
     )
 
     return {
         "Planejadas": manutencoes_agendadas,
+        "Planejadas elegíveis MCI": planejadas_elegiveis_mci,
         "Executadas planejadas": agendadas_executadas,
-        "Improdutivas": improdutivas,
+        "Improdutivas": improdutivas_totais,
         "Improdutivas agendadas": improdutivas_agendadas,
         "Improdutivas extras": improdutivas_extras,
+        "Improdutivas consideradas MD": improdutivas_consideradas,
+        "Improdutivas expurgadas": improdutivas_expurgadas,
+        "Improdutivas expurgadas agendadas": improdutivas_expurgadas_agendadas,
+        "Improdutivas expurgadas extras": improdutivas_expurgadas_extras,
+        "Base MD": base_md,
         "Canceladas": canceladas,
         "No-show": no_show,
         "Possíveis substituições de OS": int(
@@ -1268,21 +1377,27 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         "Executadas extras": executadas_extras,
         "MCI": mci,
         "MD": md,
+        # No-show e cancelamento permanecem sobre o planejamento-base
+        # original. A nova regra altera somente MCI e MD.
         "Índice no-show": (
-            no_show / manutencoes_agendadas * 100
+            no_show
+            / manutencoes_agendadas
+            * 100
             if manutencoes_agendadas
             else 0.0
         ),
         "Índice cancelamento": (
-            canceladas / manutencoes_agendadas * 100
+            canceladas
+            / manutencoes_agendadas
+            * 100
             if manutencoes_agendadas
             else 0.0
         ),
         "Execução total": (
             total_executadas
-            / manutencoes_agendadas
+            / planejadas_elegiveis_mci
             * 100
-            if manutencoes_agendadas
+            if planejadas_elegiveis_mci
             else 0.0
         ),
     }
@@ -1381,7 +1496,13 @@ def preparar_pre_agenda_para_banco(
     Prepara uma fotografia independente do processo de aceite/alocação.
     Não altera atividades_planejadas nem planejamento_base.
     """
-    base = filtrar_somente_manutencoes(df).copy()
+    # O Controle Pré-Agenda é preventivo e acompanha aceite/alocação
+    # de todas as atividades do relatório, não apenas manutenções.
+    # Isso NÃO altera Planejado, Resultado, MCI, MD ou planejamento_base.
+    base = df.copy()
+
+    if base is None or base.empty:
+        return []
 
     colunas_obrigatorias = ["OS", "Oficina", "Recurso"]
     faltantes = [
@@ -1493,7 +1614,7 @@ def salvar_pre_agenda(
 
     if not registros:
         raise ValueError(
-            "Nenhuma manutenção encontrada no arquivo de pré-agenda."
+            "Nenhuma atividade encontrada no arquivo de pré-agenda."
         )
 
     inserir_em_lotes(
@@ -1544,6 +1665,8 @@ def carregar_pre_agenda_mais_recente() -> pd.DataFrame:
         "oficina": "Oficina",
         "recurso": "Recurso",
         "status_atividade": "Status",
+        "tipo_atividade": "Tipo de Atividade",
+        "chave_atendimento": "Chave Atendimento",
         "aceite_os": "Aceite OS",
         "flag_os_rejeitada": "Flag rejeitada",
         "motivo_rejeicao": "Motivo rejeição",
@@ -1554,6 +1677,172 @@ def carregar_pre_agenda_mais_recente() -> pd.DataFrame:
     base = base.rename(columns=renomear)
 
     return base
+
+
+
+@st.cache_data(ttl=CACHE_TTL_SEGUNDOS, show_spinner=False)
+def carregar_duas_fotografias_pre_agenda() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Retorna (fotografia_atual, fotografia_anterior).
+    As fotografias são identificadas por importacao_id e preservadas
+    em modo append-only na tabela pre_agenda_aceite.
+    """
+    registros = buscar_todos(
+        "pre_agenda_aceite",
+        ordem="importado_em",
+        desc=True,
+    )
+
+    if not registros:
+        return pd.DataFrame(), pd.DataFrame()
+
+    ids = []
+    for registro in registros:
+        ident = texto_limpo(registro.get("importacao_id", ""))
+        if ident and ident not in ids:
+            ids.append(ident)
+        if len(ids) >= 2:
+            break
+
+    def montar(importacao_id: str) -> pd.DataFrame:
+        if not importacao_id:
+            return pd.DataFrame()
+
+        fotografia = [
+            registro
+            for registro in registros
+            if texto_limpo(registro.get("importacao_id", ""))
+            == importacao_id
+        ]
+        base = pd.DataFrame(fotografia)
+        if base.empty:
+            return base
+
+        renomear = {
+            "data_operacional": "Data operacional",
+            "ticket_jira": "Ticket Jira",
+            "os": "OS",
+            "placa": "Placa",
+            "oficina": "Oficina",
+            "recurso": "Recurso",
+            "status_atividade": "Status",
+            "tipo_atividade": "Tipo de Atividade",
+            "aceite_os": "Aceite OS",
+            "flag_os_rejeitada": "Flag rejeitada",
+            "motivo_rejeicao": "Motivo rejeição",
+            "situacao_pre_agenda": "Situação",
+            "nome_arquivo": "Arquivo",
+            "importado_em": "Importado em",
+            "chave_atendimento": "Chave Atendimento",
+        }
+        return base.rename(columns=renomear)
+
+    atual = montar(ids[0] if ids else "")
+    anterior = montar(ids[1] if len(ids) > 1 else "")
+    return atual, anterior
+
+
+def chave_comparacao_pre_agenda(linha: pd.Series) -> str:
+    """
+    Usa OS como chave preferencial porque é a referência operacional
+    mais estável para comparar fotografias. Se faltar OS, usa a chave
+    de atendimento persistida.
+    """
+    os_numero = texto_limpo(linha.get("OS", ""))
+    if os_numero:
+        return "OS:" + normalizar_texto(os_numero)
+
+    chave = texto_limpo(linha.get("Chave Atendimento", ""))
+    if chave:
+        return "CHAVE:" + normalizar_texto(chave)
+
+    return ""
+
+
+def comparar_fotografias_pre_agenda(
+    atual: pd.DataFrame,
+    anterior: pd.DataFrame,
+) -> dict:
+    resultado = {
+        "alocadas_desde_anterior": pd.DataFrame(),
+        "persistem_sem_tecnico": pd.DataFrame(),
+        "novas_sem_tecnico": pd.DataFrame(),
+        "rejeitadas_novas": pd.DataFrame(),
+    }
+
+    if atual.empty:
+        return resultado
+
+    atual = atual.copy()
+    atual["__chave_comp"] = atual.apply(
+        chave_comparacao_pre_agenda,
+        axis=1,
+    )
+    atual = atual[atual["__chave_comp"] != ""].copy()
+
+    if anterior.empty:
+        resultado["novas_sem_tecnico"] = atual[
+            atual["Situação"] == "Sem técnico / requer alocação"
+        ].copy()
+        resultado["rejeitadas_novas"] = atual[
+            atual["Situação"] == "Rejeitada pela oficina"
+        ].copy()
+        return resultado
+
+    anterior = anterior.copy()
+    anterior["__chave_comp"] = anterior.apply(
+        chave_comparacao_pre_agenda,
+        axis=1,
+    )
+    anterior = anterior[
+        anterior["__chave_comp"] != ""
+    ].drop_duplicates(
+        subset=["__chave_comp"],
+        keep="last",
+    )
+
+    atual = atual.drop_duplicates(
+        subset=["__chave_comp"],
+        keep="last",
+    )
+
+    mapa_anterior = anterior.set_index("__chave_comp")["Situação"].to_dict()
+    chaves_anterior = set(anterior["__chave_comp"])
+
+    atual["Situação anterior"] = atual["__chave_comp"].map(
+        mapa_anterior
+    ).fillna("Não estava na fotografia anterior")
+
+    resultado["alocadas_desde_anterior"] = atual[
+        (atual["Situação"] == "Atribuída ao técnico")
+        & (
+            atual["Situação anterior"]
+            == "Sem técnico / requer alocação"
+        )
+    ].copy()
+
+    resultado["persistem_sem_tecnico"] = atual[
+        (atual["Situação"] == "Sem técnico / requer alocação")
+        & (
+            atual["Situação anterior"]
+            == "Sem técnico / requer alocação"
+        )
+    ].copy()
+
+    resultado["novas_sem_tecnico"] = atual[
+        (atual["Situação"] == "Sem técnico / requer alocação")
+        & (~atual["__chave_comp"].isin(chaves_anterior))
+    ].copy()
+
+    resultado["rejeitadas_novas"] = atual[
+        (atual["Situação"] == "Rejeitada pela oficina")
+        & (
+            atual["Situação anterior"]
+            != "Rejeitada pela oficina"
+        )
+    ].copy()
+
+    return resultado
 
 
 def enriquecer_pre_agenda_com_cadastro(
@@ -2915,23 +3204,23 @@ def exibir_cards_indicadores(
         "MCI — Execução",
         f'{indicadores["MCI"]:.1f}%',
         help=(
-            "Mede a execução total frente ao planejamento-base. "
-            "Fórmula: (Agendadas executadas + Executadas extras) ÷ "
-            "Manutenções agendadas × 100. As extras contam como execução, "
-            "mas continuam identificadas separadamente nos cards. "
-            "O indicador pode superar 100% quando a execução total for maior "
-            "que o volume originalmente agendado. Meta de referência: 90%."
+            "Fórmula vigente: (Agendadas executadas + Executadas extras) ÷ "
+            "Planejadas elegíveis MCI × 100. Planejadas elegíveis MCI = "
+            "Manutenções agendadas menos improdutivas agendadas com os motivos "
+            "'Problemas técnicos com sistemas' e 'Problemas técnicos com veículos'. "
+            "Essas OS permanecem visíveis no painel de improdutividade, mas não "
+            "penalizam a MCI."
         ),
     )
     i2.metric(
         "MD — Improdutividade",
         f'{indicadores["MD"]:.1f}%',
         help=(
-            "Mede a participação das improdutivas entre os atendimentos "
-            "efetivamente trabalhados. Fórmula: Improdutivas totais ÷ "
-            "(Agendadas executadas + Executadas extras + Improdutivas totais) "
-            "× 100. Inclui improdutivas agendadas e extras. "
-            "Meta de referência: abaixo de 10%."
+            "Fórmula vigente: Improdutivas consideradas ÷ "
+            "(Executadas agendadas + Executadas extras + Improdutivas consideradas) "
+            "× 100. São expurgadas da MD as improdutivas com os motivos "
+            "'Problemas técnicos com sistemas' e 'Problemas técnicos com veículos'. "
+            "As OS continuam visíveis no detalhamento."
         ),
     )
     i3.metric(
@@ -2954,12 +3243,20 @@ def exibir_cards_indicadores(
         "Execução total",
         f'{indicadores["Execução total"]:.1f}%',
         help=(
-            "Visão da execução total sobre o planejamento-base. "
-            "Fórmula: (Agendadas executadas + Executadas extras) ÷ "
-            "Manutenções agendadas × 100. Com a nova regra departamental, "
-            "este percentual usa a mesma base matemática da MCI."
+            "Usa a mesma base matemática da MCI. Fórmula: "
+            "(Agendadas executadas + Executadas extras) ÷ Planejadas elegíveis MCI "
+            "× 100, após o expurgo das improdutivas agendadas por problemas "
+            "técnicos com sistemas e com veículos."
         ),
     )
+
+    if indicadores.get("Improdutivas expurgadas", 0):
+        st.caption(
+            "ℹ️ Regra vigente: "
+            f'{indicadores["Improdutivas expurgadas"]} improdutiva(s) '
+            "foram mantidas no histórico/detalhamento, mas expurgadas de MCI/MD "
+            "por motivo técnico de sistema ou veículo."
+        )
 
 
 def filtrar_detalhes(
@@ -4083,9 +4380,16 @@ def ranking_md_dimensao(base: pd.DataFrame, dimensao: str, minimo_base_md: int =
     for valor, grupo in base.groupby(dimensao, dropna=False):
         nome = texto_limpo(valor) or "Não definido"
         indicadores = calcular_indicadores(grupo)
-        executadas = indicadores["Executadas planejadas"] + indicadores["Executadas extras"]
+        executadas = (
+            indicadores["Executadas planejadas"]
+            + indicadores["Executadas extras"]
+        )
         improdutivas = indicadores["Improdutivas"]
-        base_md = executadas + improdutivas
+        improdutivas_consideradas = indicadores[
+            "Improdutivas consideradas MD"
+        ]
+        expurgadas = indicadores["Improdutivas expurgadas"]
+        base_md = indicadores["Base MD"]
 
         if base_md < minimo_base_md:
             continue
@@ -4103,6 +4407,8 @@ def ranking_md_dimensao(base: pd.DataFrame, dimensao: str, minimo_base_md: int =
             dimensao: nome,
             "Executadas": executadas,
             "Improdutivas": improdutivas,
+            "Improdutivas consideradas": improdutivas_consideradas,
+            "Expurgadas": expurgadas,
             "Base MD": base_md,
             "MD (%)": indicadores["MD"],
             "Principal motivo": principal_motivo,
@@ -4130,8 +4436,9 @@ def ranking_md_dimensao(base: pd.DataFrame, dimensao: str, minimo_base_md: int =
 def exibir_diagnostico_md_semanal(base_semana: pd.DataFrame, inicio_semana, fim_semana) -> None:
     st.markdown("### 🧭 MD — Diagnóstico da semana")
     st.caption(
-        "Leitura executiva da improdutividade: percentual geral, "
-        "principais motivos e concentração por região e oficina. "
+        "Leitura executiva da improdutividade. A MD expurga problemas técnicos "
+        "com sistemas e problemas técnicos com veículos, mas o ranking de motivos "
+        "continua exibindo todas as improdutivas para análise e plano de ação. "
         "Canceladas e no-show não entram na MD."
     )
 
@@ -4987,7 +5294,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.6.0 — Controle Pré-Agenda, aceite e alocação"
+        "Versão 2.6.2 — Expurgo técnico retroativo em MCI e MD"
     )
 
 
@@ -5159,7 +5466,7 @@ if pagina == "📥 Importações":
     with aba_pre_agenda:
         st.markdown("### Controle Pré-Agenda — Aceite e Alocação")
         st.caption(
-            "Importe o relatório do OFS usado para acompanhar aceite/alocação. "
+            "Importe o relatório do OFS usado para acompanhar aceite/alocação de todas as atividades. "
             "Esta base é independente do Planejado e não altera MCI, MD ou "
             "planejamento_base."
         )
@@ -5173,9 +5480,7 @@ if pagina == "📥 Importações":
         if arquivo_pre is not None:
             try:
                 df_pre = ler_csv_ofs(arquivo_pre)
-                preview_pre = filtrar_somente_manutencoes(
-                    df_pre
-                ).copy()
+                preview_pre = df_pre.copy()
 
                 for coluna in [
                     "Motivos de Rejeição da OS",
@@ -5198,7 +5503,7 @@ if pagina == "📥 Importações":
                 )
 
                 st.write(
-                    f"Manutenções identificadas: **{len(preview_pre)}**"
+                    f"Atividades identificadas: **{len(preview_pre)}**"
                 )
                 st.dataframe(
                     resumo_pre,
@@ -5213,6 +5518,7 @@ if pagina == "📥 Importações":
                         "OS",
                         "Oficina",
                         "Recurso",
+                        "Tipo de Atividade",
                         "Status da Atividade",
                         "Motivos de Rejeição da OS",
                         "Situação",
@@ -5236,7 +5542,7 @@ if pagina == "📥 Importações":
                         df_pre,
                     )
                     st.success(
-                        f"Fotografia salva: {quantidade} manutenção(ões)."
+                        f"Fotografia salva: {quantidade} atividade(s)."
                     )
                     st.rerun()
 
@@ -6100,94 +6406,34 @@ elif pagina == "👤 Painel do Consultor":
     st.divider()
     st.subheader("Ranking consolidado das oficinas")
 
-    ranking = (
-        base_consolidada_consultor
-        .groupby("Oficina", dropna=False)
-        .agg(
-            Planejadas=(
-                "Classificação",
-                lambda serie: int(
-                    serie.isin(
-                        [
-                            "Executada agendada",
-                            "Improdutiva agendada",
-                            "Cancelada",
-                            "No-show",
-                            "Status intermediário agendado",
-                        ]
-                    ).sum()
-                ),
-            ),
-            Executadas=(
-                "Classificação",
-                lambda serie: int(
-                    (serie == "Executada agendada").sum()
-                ),
-            ),
-            Improdutivas=(
-                "Classificação",
-                lambda serie: int(
-                    serie.isin(
-                        ["Improdutiva agendada", "Improdutiva extra"]
-                    ).sum()
-                ),
-            ),
-            No_show=(
-                "Classificação",
-                lambda serie: int(
-                    (serie == "No-show").sum()
-                ),
-            ),
-            Canceladas=(
-                "Classificação",
-                lambda serie: int(
-                    (serie == "Cancelada").sum()
-                ),
-            ),
-            Extras=(
-                "Classificação",
-                lambda serie: int(
-                    (serie == "Executada extra").sum()
-                ),
-            ),
+    linhas_ranking = []
+
+    for oficina, grupo in base_consolidada_consultor.groupby(
+        "Oficina",
+        dropna=False,
+    ):
+        ind = calcular_indicadores(grupo)
+
+        linhas_ranking.append(
+            {
+                "Oficina": texto_limpo(oficina) or "Não definida",
+                "Planejadas": ind["Planejadas"],
+                "Planejadas elegíveis MCI": ind["Planejadas elegíveis MCI"],
+                "Executadas": ind["Executadas planejadas"],
+                "Extras": ind["Executadas extras"],
+                "Improdutivas": ind["Improdutivas"],
+                "Improdutivas consideradas": ind["Improdutivas consideradas MD"],
+                "Expurgadas": ind["Improdutivas expurgadas"],
+                "No_show": ind["No-show"],
+                "Canceladas": ind["Canceladas"],
+                "MCI (%)": ind["MCI"],
+                "MD (%)": ind["MD"],
+            }
         )
-        .reset_index()
-    )
+
+    ranking = pd.DataFrame(linhas_ranking)
 
     if not ranking.empty:
-        ranking["MCI (%)"] = ranking.apply(
-            lambda linha: (
-                (
-                    linha["Executadas"]
-                    + linha["Extras"]
-                )
-                / linha["Planejadas"]
-                * 100
-                if linha["Planejadas"]
-                else 0.0
-            ),
-            axis=1,
-        )
-
-        ranking["MD (%)"] = ranking.apply(
-            lambda linha: (
-                linha["Improdutivas"]
-                / (
-                    linha["Executadas"]
-                    + linha["Extras"]
-                    + linha["Improdutivas"]
-                )
-                * 100
-                if (
-                    linha["Executadas"]
-                    + linha["Extras"]
-                    + linha["Improdutivas"]
-                )
-                else 0.0
-            ),
-            axis=1,
-        )
-
         ranking = ranking.sort_values(
             ["Planejadas", "Oficina"],
             ascending=[False, True],
@@ -6347,7 +6593,7 @@ elif pagina == "🛰️ Controle Pré-Agenda":
         "sem técnico atribuído. Prioridade operacional: D+1 e D+2."
     )
 
-    fotografia = carregar_pre_agenda_mais_recente()
+    fotografia, fotografia_anterior = carregar_duas_fotografias_pre_agenda()
 
     if fotografia.empty:
         st.info(
@@ -6361,6 +6607,12 @@ elif pagina == "🛰️ Controle Pré-Agenda":
         fotografia,
         cadastro,
     )
+
+    if not fotografia_anterior.empty:
+        fotografia_anterior = enriquecer_pre_agenda_com_cadastro(
+            fotografia_anterior,
+            cadastro,
+        )
 
     fotografia["Data_dt"] = pd.to_datetime(
         fotografia["Data operacional"],
@@ -6418,11 +6670,90 @@ elif pagina == "🛰️ Controle Pré-Agenda":
     )
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("OS na fotografia", total)
+    c1.metric("Atividades na fotografia", total)
     c2.metric("🟢 Atribuídas", atribuida)
     c3.metric("🔴 Rejeitadas", rejeitada)
     c4.metric("🟠 Sem técnico", sem_tecnico)
     c5.metric("⚪ A validar", validar)
+
+    # -----------------------------
+    # Evolução entre fotografias
+    # -----------------------------
+    comparacao = comparar_fotografias_pre_agenda(
+        fotografia,
+        fotografia_anterior,
+    )
+
+    st.markdown("### 🔄 Evolução desde a fotografia anterior")
+
+    if fotografia_anterior.empty:
+        st.info(
+            "Ainda não existe uma fotografia anterior comparável. "
+            "A evolução ficará disponível a partir da próxima importação."
+        )
+    else:
+        alocadas_novas = comparacao["alocadas_desde_anterior"]
+        persistentes = comparacao["persistem_sem_tecnico"]
+        novas_sem = comparacao["novas_sem_tecnico"]
+        rejeitadas_novas = comparacao["rejeitadas_novas"]
+
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric(
+            "🟢 Alocadas desde a foto anterior",
+            len(alocadas_novas),
+            help=(
+                "Atividades que estavam sem técnico na fotografia anterior "
+                "e agora estão atribuídas a um recurso diferente da oficina."
+            ),
+        )
+        e2.metric(
+            "🔴 Persistem sem técnico",
+            len(persistentes),
+            help=(
+                "Atividades que já estavam sem técnico na fotografia anterior "
+                "e continuam sem alocação. São as de maior atenção operacional."
+            ),
+        )
+        e3.metric(
+            "🟠 Novas sem técnico",
+            len(novas_sem),
+            help=(
+                "Atividades sem técnico que não estavam presentes na fotografia anterior."
+            ),
+        )
+        e4.metric(
+            "🔴 Novas rejeitadas",
+            len(rejeitadas_novas),
+            help=(
+                "Atividades que passaram a apresentar evidência de rejeição "
+                "desde a fotografia anterior."
+            ),
+        )
+
+        if not persistentes.empty:
+            st.markdown("#### ⚠️ Persistem sem técnico desde a foto anterior")
+            cols_persist = [
+                coluna
+                for coluna in [
+                    "Data operacional",
+                    "OS",
+                    "Tipo de Atividade",
+                    "Oficina",
+                    "Consultor",
+                    "Região",
+                    "Recurso",
+                    "Situação",
+                    "Situação anterior",
+                ]
+                if coluna in persistentes.columns
+            ]
+            st.dataframe(
+                persistentes[cols_persist].sort_values(
+                    ["Data operacional", "Oficina", "OS"]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     # -----------------------------
     # Filtros
@@ -6566,6 +6897,7 @@ elif pagina == "🛰️ Controle Pré-Agenda":
             "Prioridade",
             "Data operacional",
             "OS",
+            "Tipo de Atividade",
             "Oficina",
             "Consultor",
             "Região",
