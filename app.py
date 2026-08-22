@@ -202,6 +202,7 @@ def carregar_revisoes_md() -> pd.DataFrame:
                 "data_operacional",
                 "chave_atendimento",
                 "motivo_original",
+                "classificacao_md",
                 "motivo_md_revisado",
                 "justificativa",
                 "revisor",
@@ -217,6 +218,7 @@ def salvar_revisao_md(
     data_operacional: str,
     chave_atendimento: str,
     motivo_original: str,
+    classificacao_md: str,
     motivo_md_revisado: str,
     justificativa: str,
     revisor: str,
@@ -227,6 +229,7 @@ def salvar_revisao_md(
         "data_operacional": data_operacional,
         "chave_atendimento": chave_atendimento,
         "motivo_original": motivo_original,
+        "classificacao_md": classificacao_md,
         "motivo_md_revisado": motivo_md_revisado,
         "justificativa": justificativa,
         "revisor": revisor,
@@ -266,9 +269,8 @@ def aplicar_revisoes_md(
     base: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Cria uma camada paralela exclusiva da MD.
-    Não altera Razao_improdutiva, Classificação, arquivos operacionais,
-    rankings de motivos nem qualquer análise operacional.
+    Camada gerencial exclusiva da MD.
+    Não altera o dado original do OFS nem a MCI.
     """
     if base is None or base.empty:
         return base
@@ -280,6 +282,7 @@ def aplicar_revisoes_md(
         pd.Series("", index=resultado.index, dtype=str),
     ).apply(texto_limpo)
 
+    resultado["Classificacao_gerencial_MD"] = "Improdutiva"
     resultado["Revisao_MD"] = False
     resultado["Justificativa_revisao_MD"] = ""
     resultado["Revisor_MD"] = ""
@@ -289,18 +292,10 @@ def aplicar_revisoes_md(
     if revisoes.empty:
         return resultado
 
-    revisoes = revisoes.copy()
-    revisoes["data_operacional"] = revisoes[
-        "data_operacional"
-    ].astype(str)
-    revisoes["chave_atendimento"] = revisoes[
-        "chave_atendimento"
-    ].astype(str)
-
     mapa = {
         (
-            texto_limpo(linha["data_operacional"]),
-            texto_limpo(linha["chave_atendimento"]),
+            texto_limpo(linha.get("data_operacional", "")),
+            texto_limpo(linha.get("chave_atendimento", "")),
         ): linha
         for _, linha in revisoes.iterrows()
     }
@@ -312,35 +307,37 @@ def aplicar_revisoes_md(
         )
 
         revisao = mapa.get(chave)
-
         if revisao is None:
             continue
 
-        motivo_revisado = texto_limpo(
+        classificacao = (
+            texto_limpo(revisao.get("classificacao_md", ""))
+            or "Improdutiva"
+        )
+        motivo = texto_limpo(
             revisao.get("motivo_md_revisado", "")
         )
 
-        if motivo_revisado:
+        resultado.at[
+            indice, "Classificacao_gerencial_MD"
+        ] = classificacao
+
+        if motivo:
             resultado.at[
-                indice,
-                "Razao_improdutiva_md",
-            ] = motivo_revisado
-            resultado.at[
-                indice,
-                "Revisao_MD",
-            ] = True
-            resultado.at[
-                indice,
-                "Justificativa_revisao_MD",
-            ] = texto_limpo(
-                revisao.get("justificativa", "")
-            )
-            resultado.at[
-                indice,
-                "Revisor_MD",
-            ] = texto_limpo(
-                revisao.get("revisor", "")
-            )
+                indice, "Razao_improdutiva_md"
+            ] = motivo
+
+        resultado.at[indice, "Revisao_MD"] = True
+        resultado.at[
+            indice, "Justificativa_revisao_MD"
+        ] = texto_limpo(
+            revisao.get("justificativa", "")
+        )
+        resultado.at[
+            indice, "Revisor_MD"
+        ] = texto_limpo(
+            revisao.get("revisor", "")
+        )
 
     return resultado
 
@@ -1497,9 +1494,36 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         ).sum()
     )
 
+    classificacao_gerencial = conciliacao.get(
+        "Classificacao_gerencial_MD",
+        pd.Series(
+            "Improdutiva",
+            index=conciliacao.index,
+            dtype=str,
+        ),
+    ).fillna("Improdutiva")
+
+    mascara_retirada_md = (
+        conciliacao["Classificação"].isin(
+            ["Improdutiva agendada", "Improdutiva extra"]
+        )
+        & classificacao_gerencial.isin(
+            ["No-show técnico", "No-show cliente", "Cancelada"]
+        )
+    )
+
+    improdutivas_retiradas_md = int(
+        mascara_retirada_md.sum()
+    )
+
+    mascara_fora_md = (
+        mascara_expurgada_md
+        | mascara_retirada_md
+    )
+
     improdutivas_consideradas = max(
         improdutivas_totais
-        - improdutivas_expurgadas_md,
+        - int(mascara_fora_md.sum()),
         0,
     )
 
@@ -1560,6 +1584,7 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         "Improdutivas agendadas": improdutivas_agendadas,
         "Improdutivas extras": improdutivas_extras,
         "Improdutivas consideradas MD": improdutivas_consideradas,
+        "Improdutivas reclassificadas fora da MD": improdutivas_retiradas_md,
         "Improdutivas expurgadas": improdutivas_expurgadas_md,
         "Improdutivas expurgadas MD": improdutivas_expurgadas_md,
         "Improdutivas expurgadas MCI": improdutivas_expurgadas_mci,
@@ -5498,7 +5523,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.6.3 — Revisão gerencial de motivo exclusiva da MD"
+        "Versão 2.6.4 — Tratativa MD por consultor, técnico e classificação gerencial"
     )
 
 
@@ -7315,7 +7340,18 @@ elif pagina == "📉 Dashboard de Improdutividade":
         }
     )
 
-    f3, f4 = st.columns(2)
+    tecnicos = sorted(
+        {
+            texto_limpo(v)
+            for v in filtrada.get(
+                "Tecnico_recurso",
+                pd.Series(dtype=str),
+            )
+            if texto_limpo(v)
+        }
+    )
+
+    f3, f4, f5 = st.columns(3)
 
     with f3:
         consultor_filtro = multiselect_persistente(
@@ -7331,6 +7367,13 @@ elif pagina == "📉 Dashboard de Improdutividade":
             key="imp_oficina",
         )
 
+    with f5:
+        tecnico_filtro = multiselect_persistente(
+            "Técnico / recurso",
+            tecnicos,
+            key="imp_tecnico",
+        )
+
     if consultor_filtro:
         filtrada = filtrada[
             filtrada["Consultor"].isin(
@@ -7342,6 +7385,13 @@ elif pagina == "📉 Dashboard de Improdutividade":
         filtrada = filtrada[
             filtrada["Oficina"].isin(
                 oficina_filtro
+            )
+        ].copy()
+
+    if tecnico_filtro:
+        filtrada = filtrada[
+            filtrada["Tecnico_recurso"].isin(
+                tecnico_filtro
             )
         ].copy()
 
@@ -7376,6 +7426,11 @@ elif pagina == "📉 Dashboard de Improdutividade":
     if oficina_filtro:
         base_md_filtrada = base_md_filtrada[
             base_md_filtrada["Oficina"].isin(oficina_filtro)
+        ].copy()
+
+    if tecnico_filtro:
+        base_md_filtrada = base_md_filtrada[
+            base_md_filtrada["Tecnico_recurso"].isin(tecnico_filtro)
         ].copy()
 
     if "Consultor" not in base_md_filtrada.columns:
@@ -7825,113 +7880,165 @@ elif pagina == "📉 Dashboard de Improdutividade":
     )
 
     # =====================================================
-    # REVISÃO GERENCIAL EXCLUSIVA DA MD
+    # TRATATIVA GERENCIAL EXCLUSIVA DA MD
     # =====================================================
     st.divider()
-    st.markdown("### ✍️ Revisão gerencial da MD")
+    st.markdown("### ✍️ Tratativa gerencial da MD")
     st.caption(
-        "A revisão altera somente o motivo usado no cálculo da MD. "
-        "O motivo original do OFS, a classificação da OS, os arquivos "
-        "operacionais, MCI e as análises históricas permanecem intactos."
+        "A tratativa altera somente a MD. O apontamento original do OFS, "
+        "os arquivos operacionais, a MCI e as contagens históricas "
+        "continuam intactos."
     )
 
     analise_revisao = analise.copy()
 
+    total_carteira = len(analise_revisao)
+    revisadas = int(
+        analise_revisao.get(
+            "Revisao_MD",
+            pd.Series(False, index=analise_revisao.index),
+        ).fillna(False).astype(bool).sum()
+    )
+    pendentes = max(total_carteira - revisadas, 0)
+    no_show_tecnico = int(
+        (
+            analise_revisao.get(
+                "Classificacao_gerencial_MD",
+                pd.Series("", index=analise_revisao.index),
+            ) == "No-show técnico"
+        ).sum()
+    )
+
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("OS no filtro", total_carteira)
+    r2.metric("Pendentes", pendentes)
+    r3.metric("Revisadas", revisadas)
+    r4.metric("No-show técnico", no_show_tecnico)
+
+    st.caption(
+        "Os filtros de Consultor, Oficina e Técnico/Recurso acima também "
+        "controlam esta fila. Assim cada consultor trata apenas a sua carteira."
+    )
+
+    situacao = st.radio(
+        "Situação",
+        ["Todas", "Pendentes", "Revisadas"],
+        horizontal=True,
+        key="md_status_revisao",
+    )
+
+    mascara_revisada = analise_revisao.get(
+        "Revisao_MD",
+        pd.Series(False, index=analise_revisao.index),
+    ).fillna(False).astype(bool)
+
+    if situacao == "Pendentes":
+        analise_revisao = analise_revisao[~mascara_revisada].copy()
+    elif situacao == "Revisadas":
+        analise_revisao = analise_revisao[mascara_revisada].copy()
+
     analise_revisao["OS_exibir"] = analise_revisao[
         "OS_resultado"
-    ].apply(
-        lambda v: texto_limpo(v) or "Sem OS"
-    )
+    ].apply(lambda v: texto_limpo(v) or "Sem OS")
 
     analise_revisao["Rotulo_revisao"] = analise_revisao.apply(
         lambda linha: (
             f"{texto_limpo(linha.get('Data Operacional', ''))} | "
             f"OS {texto_limpo(linha.get('OS_exibir', ''))} | "
-            f"{texto_limpo(linha.get('Oficina', ''))} | "
-            f"{texto_limpo(linha.get('Razao_improdutiva', ''))}"
+            f"{texto_limpo(linha.get('Tecnico_recurso', ''))} | "
+            f"{texto_limpo(linha.get('Oficina', ''))}"
         ),
         axis=1,
     )
 
-    opcoes_revisao = analise_revisao[
-        "Rotulo_revisao"
-    ].tolist()
+    opcoes = analise_revisao["Rotulo_revisao"].tolist()
 
-    if opcoes_revisao:
-        selecionada_revisao = st.selectbox(
-            "Selecione a OS para revisar",
-            opcoes_revisao,
+    if not opcoes:
+        st.info("Nenhuma OS encontrada nessa situação.")
+    else:
+        selecionada = st.selectbox(
+            "Selecione a OS para tratar",
+            opcoes,
             key="md_revisao_os",
         )
 
-        linha_revisao = analise_revisao[
-            analise_revisao["Rotulo_revisao"]
-            == selecionada_revisao
+        linha = analise_revisao[
+            analise_revisao["Rotulo_revisao"] == selecionada
         ].iloc[0]
 
-        rv1, rv2 = st.columns(2)
-
-        with rv1:
+        c1, c2 = st.columns(2)
+        with c1:
             st.markdown(
-                "**Motivo original do OFS:**  \n"
-                + (
-                    texto_limpo(
-                        linha_revisao.get(
-                            "Razao_improdutiva",
-                            "",
-                        )
-                    )
-                    or "Não informado"
-                )
+                "**Motivo OFS:**  \n"
+                + (texto_limpo(linha.get("Razao_improdutiva", "")) or "Não informado")
             )
             st.markdown(
                 "**Observação do técnico:**  \n"
                 + (
                     texto_limpo(
-                        linha_revisao.get(
-                            "Observacao_tecnico_improdutiva",
-                            "",
-                        )
+                        linha.get("Observacao_tecnico_improdutiva", "")
                     )
                     or "Sem observação"
                 )
             )
-
-        with rv2:
             st.markdown(
-                "**Motivo atualmente usado na MD:**  \n"
+                "**Técnico / recurso:**  \n"
+                + (texto_limpo(linha.get("Tecnico_recurso", "")) or "Não informado")
+            )
+
+        with c2:
+            st.markdown(
+                "**Consultor:**  \n"
+                + (texto_limpo(linha.get("Consultor", "")) or "Não definido")
+            )
+            st.markdown(
+                "**Oficina:**  \n"
+                + (texto_limpo(linha.get("Oficina", "")) or "Não definida")
+            )
+            st.markdown(
+                "**Classificação MD atual:**  \n"
                 + (
                     texto_limpo(
-                        linha_revisao.get(
-                            "Razao_improdutiva_md",
-                            "",
-                        )
+                        linha.get("Classificacao_gerencial_MD", "")
                     )
-                    or "Não informado"
+                    or "Improdutiva"
                 )
             )
-            if bool(
-                linha_revisao.get(
-                    "Revisao_MD",
-                    False,
-                )
-            ):
-                st.info(
-                    "Esta OS já possui revisão gerencial da MD."
-                )
 
-        motivos_existentes = sorted(
-            {
-                texto_limpo(v)
-                for v in base.get(
-                    "Razao_improdutiva",
-                    pd.Series(dtype=str),
-                )
-                if texto_limpo(v)
-            }
+        classificacoes = [
+            "Improdutiva",
+            "No-show técnico",
+            "No-show cliente",
+            "Cancelada",
+        ]
+        atual = (
+            texto_limpo(
+                linha.get("Classificacao_gerencial_MD", "")
+            )
+            or "Improdutiva"
+        )
+        idx = classificacoes.index(atual) if atual in classificacoes else 0
+
+        classificacao_md = st.selectbox(
+            "Classificação gerencial para a MD",
+            classificacoes,
+            index=idx,
+            help=(
+                "No-show técnico, No-show cliente e Cancelada retiram a OS "
+                "do universo da MD, mas não alteram o registro original."
+            ),
+            key="md_revisao_classificacao",
         )
 
-        motivos_prioritarios = [
+        motivo_original = texto_limpo(
+            linha.get("Razao_improdutiva", "")
+        )
+        motivo_md = (
+            texto_limpo(linha.get("Razao_improdutiva_md", ""))
+            or motivo_original
+        )
+
+        motivos = [
             "Problemas técnicos com sistemas",
             "Problemas técnicos com veículos",
             "Veículo indisponível",
@@ -7942,134 +8049,81 @@ elif pagina == "📉 Dashboard de Improdutividade":
             "OS / cadastro / direcionamento",
             "Sinistro",
         ]
-
-        opcoes_motivo_md = []
-        for motivo in (
-            motivos_prioritarios
-            + motivos_existentes
+        for valor in base.get(
+            "Razao_improdutiva",
+            pd.Series(dtype=str),
         ):
-            if motivo not in opcoes_motivo_md:
-                opcoes_motivo_md.append(motivo)
+            valor = texto_limpo(valor)
+            if valor and valor not in motivos:
+                motivos.append(valor)
 
-        motivo_atual_md = texto_limpo(
-            linha_revisao.get(
-                "Razao_improdutiva_md",
-                "",
+        if motivo_md and motivo_md not in motivos:
+            motivos.insert(0, motivo_md)
+
+        novo_motivo_md = motivo_md
+        if classificacao_md == "Improdutiva":
+            idx_motivo = motivos.index(motivo_md) if motivo_md in motivos else 0
+            novo_motivo_md = st.selectbox(
+                "Motivo validado para a MD",
+                motivos,
+                index=idx_motivo,
+                key="md_revisao_motivo",
             )
-        )
+        else:
+            st.info(
+                f"Para a MD, esta OS será tratada como **{classificacao_md}** "
+                "e deixará de compor a improdutividade do indicador."
+            )
 
-        indice_default = (
-            opcoes_motivo_md.index(motivo_atual_md)
-            if motivo_atual_md in opcoes_motivo_md
-            else 0
-        )
-
-        novo_motivo_md = st.selectbox(
-            "Motivo validado para a MD",
-            opcoes_motivo_md,
-            index=indice_default,
-            key="md_revisao_motivo",
-        )
-
-        justificativa_md = st.text_area(
-            "Justificativa da revisão",
+        justificativa = st.text_area(
+            "Justificativa da tratativa",
             value=texto_limpo(
-                linha_revisao.get(
-                    "Justificativa_revisao_MD",
-                    "",
-                )
-            ),
-            placeholder=(
-                "Ex.: observação informa carro sem motor; "
-                "reclassificado para problema técnico com veículo."
+                linha.get("Justificativa_revisao_MD", "")
             ),
             key="md_revisao_justificativa",
         )
 
-        revisor_md = st.text_input(
+        revisor = st.text_input(
             "Responsável pela revisão",
-            value=texto_limpo(
-                linha_revisao.get(
-                    "Revisor_MD",
-                    "",
-                )
-            ),
+            value=texto_limpo(linha.get("Revisor_MD", "")),
             key="md_revisao_responsavel",
         )
 
-        ac1, ac2 = st.columns(2)
-
-        with ac1:
+        b1, b2 = st.columns(2)
+        with b1:
             if st.button(
-                "💾 Salvar revisão da MD",
+                "💾 Salvar tratativa da MD",
                 type="primary",
                 use_container_width=True,
                 key="salvar_revisao_md",
             ):
-                if not texto_limpo(justificativa_md):
-                    st.error(
-                        "Informe a justificativa da revisão."
-                    )
+                if not texto_limpo(justificativa):
+                    st.error("Informe a justificativa da tratativa.")
                 else:
                     salvar_revisao_md(
-                        texto_limpo(
-                            linha_revisao.get(
-                                "Data Operacional",
-                                "",
-                            )
-                        ),
-                        texto_limpo(
-                            linha_revisao.get(
-                                "Chave Atendimento",
-                                "",
-                            )
-                        ),
-                        texto_limpo(
-                            linha_revisao.get(
-                                "Razao_improdutiva",
-                                "",
-                            )
-                        ),
+                        texto_limpo(linha.get("Data Operacional", "")),
+                        texto_limpo(linha.get("Chave Atendimento", "")),
+                        motivo_original,
+                        classificacao_md,
                         novo_motivo_md,
-                        justificativa_md,
-                        revisor_md,
+                        justificativa,
+                        revisor,
                     )
-                    st.success(
-                        "Revisão salva. A MD será recalculada "
-                        "automaticamente em todas as visões."
-                    )
+                    st.success("Tratativa salva e MD recalculada.")
                     st.rerun()
 
-        with ac2:
-            if bool(
-                linha_revisao.get(
-                    "Revisao_MD",
-                    False,
-                )
-            ):
+        with b2:
+            if bool(linha.get("Revisao_MD", False)):
                 if st.button(
-                    "↩️ Remover revisão e voltar ao motivo OFS",
+                    "↩️ Voltar ao apontamento OFS",
                     use_container_width=True,
                     key="remover_revisao_md",
                 ):
                     excluir_revisao_md(
-                        texto_limpo(
-                            linha_revisao.get(
-                                "Data Operacional",
-                                "",
-                            )
-                        ),
-                        texto_limpo(
-                            linha_revisao.get(
-                                "Chave Atendimento",
-                                "",
-                            )
-                        ),
+                        texto_limpo(linha.get("Data Operacional", "")),
+                        texto_limpo(linha.get("Chave Atendimento", "")),
                     )
-                    st.success(
-                        "Revisão removida. A MD voltou a usar "
-                        "o motivo original do OFS."
-                    )
+                    st.success("Tratativa removida.")
                     st.rerun()
 
     revisoes_ativas = analise[
@@ -8080,28 +8134,28 @@ elif pagina == "📉 Dashboard de Improdutividade":
     ].copy()
 
     if not revisoes_ativas.empty:
-        st.markdown("#### Revisões MD ativas no filtro atual")
-        colunas_revisoes = [
-            coluna
-            for coluna in [
+        st.markdown("#### Tratativas MD ativas no filtro atual")
+        cols = [
+            c for c in [
                 "Data Operacional",
                 "OS_resultado",
-                "Oficina",
                 "Consultor",
+                "Oficina",
+                "Tecnico_recurso",
                 "Razao_improdutiva",
+                "Classificacao_gerencial_MD",
                 "Razao_improdutiva_md",
                 "Justificativa_revisao_MD",
                 "Revisor_MD",
-            ]
-            if coluna in revisoes_ativas.columns
+            ] if c in revisoes_ativas.columns
         ]
         st.dataframe(
-            revisoes_ativas[
-                colunas_revisoes
-            ].rename(
+            revisoes_ativas[cols].rename(
                 columns={
                     "OS_resultado": "OS",
+                    "Tecnico_recurso": "Técnico / recurso",
                     "Razao_improdutiva": "Motivo OFS",
+                    "Classificacao_gerencial_MD": "Classificação MD",
                     "Razao_improdutiva_md": "Motivo validado MD",
                     "Justificativa_revisao_MD": "Justificativa",
                     "Revisor_MD": "Revisor",
@@ -8135,6 +8189,7 @@ elif pagina == "📉 Dashboard de Improdutividade":
         "Cidade_resultado",
         "Razao_improdutiva",
         "Razao_improdutiva_md",
+        "Classificacao_gerencial_MD",
         "Revisao_MD",
         "Justificativa_revisao_MD",
         "Revisor_MD",
@@ -8167,6 +8222,7 @@ elif pagina == "📉 Dashboard de Improdutividade":
             "OS_resultado": "OS",
             "Razao_improdutiva": "Razão da Improdutiva",
             "Razao_improdutiva_md": "Motivo validado para MD",
+            "Classificacao_gerencial_MD": "Classificação gerencial MD",
             "Revisao_MD": "Revisão MD ativa",
             "Justificativa_revisao_MD": "Justificativa revisão MD",
             "Revisor_MD": "Revisor MD",
