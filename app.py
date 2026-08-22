@@ -183,6 +183,168 @@ def inserir_em_lotes(
         cliente.table(tabela).insert(lote).execute()
 
 
+
+# =========================================================
+# REVISÃO GERENCIAL EXCLUSIVA DA MD
+# =========================================================
+
+@st.cache_data(ttl=CACHE_TTL_SEGUNDOS, show_spinner=False)
+def carregar_revisoes_md() -> pd.DataFrame:
+    registros = buscar_todos(
+        "revisoes_md_improdutivas",
+        ordem="atualizado_em",
+        desc=True,
+    )
+
+    if not registros:
+        return pd.DataFrame(
+            columns=[
+                "data_operacional",
+                "chave_atendimento",
+                "motivo_original",
+                "motivo_md_revisado",
+                "justificativa",
+                "revisor",
+                "criado_em",
+                "atualizado_em",
+            ]
+        )
+
+    return pd.DataFrame(registros)
+
+
+def salvar_revisao_md(
+    data_operacional: str,
+    chave_atendimento: str,
+    motivo_original: str,
+    motivo_md_revisado: str,
+    justificativa: str,
+    revisor: str,
+) -> None:
+    cliente = exigir_supabase()
+
+    registro = {
+        "data_operacional": data_operacional,
+        "chave_atendimento": chave_atendimento,
+        "motivo_original": motivo_original,
+        "motivo_md_revisado": motivo_md_revisado,
+        "justificativa": justificativa,
+        "revisor": revisor,
+        "atualizado_em": datetime.now(FUSO_BRASIL).isoformat(),
+    }
+
+    cliente.table(
+        "revisoes_md_improdutivas"
+    ).upsert(
+        registro,
+        on_conflict="data_operacional,chave_atendimento",
+    ).execute()
+
+    st.cache_data.clear()
+
+
+def excluir_revisao_md(
+    data_operacional: str,
+    chave_atendimento: str,
+) -> None:
+    cliente = exigir_supabase()
+
+    cliente.table(
+        "revisoes_md_improdutivas"
+    ).delete().eq(
+        "data_operacional",
+        data_operacional,
+    ).eq(
+        "chave_atendimento",
+        chave_atendimento,
+    ).execute()
+
+    st.cache_data.clear()
+
+
+def aplicar_revisoes_md(
+    base: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Cria uma camada paralela exclusiva da MD.
+    Não altera Razao_improdutiva, Classificação, arquivos operacionais,
+    rankings de motivos nem qualquer análise operacional.
+    """
+    if base is None or base.empty:
+        return base
+
+    resultado = base.copy()
+
+    resultado["Razao_improdutiva_md"] = resultado.get(
+        "Razao_improdutiva",
+        pd.Series("", index=resultado.index, dtype=str),
+    ).apply(texto_limpo)
+
+    resultado["Revisao_MD"] = False
+    resultado["Justificativa_revisao_MD"] = ""
+    resultado["Revisor_MD"] = ""
+
+    revisoes = carregar_revisoes_md()
+
+    if revisoes.empty:
+        return resultado
+
+    revisoes = revisoes.copy()
+    revisoes["data_operacional"] = revisoes[
+        "data_operacional"
+    ].astype(str)
+    revisoes["chave_atendimento"] = revisoes[
+        "chave_atendimento"
+    ].astype(str)
+
+    mapa = {
+        (
+            texto_limpo(linha["data_operacional"]),
+            texto_limpo(linha["chave_atendimento"]),
+        ): linha
+        for _, linha in revisoes.iterrows()
+    }
+
+    for indice, linha in resultado.iterrows():
+        chave = (
+            texto_limpo(linha.get("Data Operacional", "")),
+            texto_limpo(linha.get("Chave Atendimento", "")),
+        )
+
+        revisao = mapa.get(chave)
+
+        if revisao is None:
+            continue
+
+        motivo_revisado = texto_limpo(
+            revisao.get("motivo_md_revisado", "")
+        )
+
+        if motivo_revisado:
+            resultado.at[
+                indice,
+                "Razao_improdutiva_md",
+            ] = motivo_revisado
+            resultado.at[
+                indice,
+                "Revisao_MD",
+            ] = True
+            resultado.at[
+                indice,
+                "Justificativa_revisao_MD",
+            ] = texto_limpo(
+                revisao.get("justificativa", "")
+            )
+            resultado.at[
+                indice,
+                "Revisor_MD",
+            ] = texto_limpo(
+                revisao.get("revisor", "")
+            )
+
+    return resultado
+
+
 # =========================================================
 # LIMPEZA E LEITURA
 # =========================================================
@@ -1182,20 +1344,51 @@ def motivo_expurgado_mci_md(valor) -> bool:
     )
 
 
-def mascara_improdutiva_expurgada(
+def mascara_improdutiva_expurgada_mci(
     base: pd.DataFrame,
 ) -> pd.Series:
+    """
+    MCI continua usando exclusivamente o motivo original do OFS.
+    A revisão manual não altera MCI.
+    """
     if base is None or base.empty:
         return pd.Series(dtype=bool)
 
-    if "Razao_improdutiva" not in base.columns:
-        motivos = pd.Series(
-            "",
-            index=base.index,
-            dtype=str,
-        )
-    else:
-        motivos = base["Razao_improdutiva"].fillna("")
+    motivos = base.get(
+        "Razao_improdutiva",
+        pd.Series("", index=base.index, dtype=str),
+    ).fillna("")
+
+    mascara_improdutiva = base["Classificação"].isin(
+        [
+            "Improdutiva agendada",
+            "Improdutiva extra",
+        ]
+    )
+
+    return (
+        mascara_improdutiva
+        & motivos.apply(motivo_expurgado_mci_md)
+    )
+
+
+def mascara_improdutiva_expurgada_md(
+    base: pd.DataFrame,
+) -> pd.Series:
+    """
+    MD usa o motivo revisado quando existir.
+    Sem revisão, usa o motivo original.
+    """
+    if base is None or base.empty:
+        return pd.Series(dtype=bool)
+
+    motivos = base.get(
+        "Razao_improdutiva_md",
+        base.get(
+            "Razao_improdutiva",
+            pd.Series("", index=base.index, dtype=str),
+        ),
+    ).fillna("")
 
     mascara_improdutiva = base["Classificação"].isin(
         [
@@ -1270,17 +1463,23 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         + improdutivas_extras
     )
 
-    mascara_expurgada = mascara_improdutiva_expurgada(
+    mascara_expurgada_mci = mascara_improdutiva_expurgada_mci(
+        conciliacao
+    )
+    mascara_expurgada_md = mascara_improdutiva_expurgada_md(
         conciliacao
     )
 
-    improdutivas_expurgadas = int(
-        mascara_expurgada.sum()
+    improdutivas_expurgadas_mci = int(
+        mascara_expurgada_mci.sum()
+    )
+    improdutivas_expurgadas_md = int(
+        mascara_expurgada_md.sum()
     )
 
-    improdutivas_expurgadas_agendadas = int(
+    improdutivas_expurgadas_agendadas_mci = int(
         (
-            mascara_expurgada
+            mascara_expurgada_mci
             & (
                 conciliacao["Classificação"]
                 == "Improdutiva agendada"
@@ -1288,9 +1487,9 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         ).sum()
     )
 
-    improdutivas_expurgadas_extras = int(
+    improdutivas_expurgadas_extras_md = int(
         (
-            mascara_expurgada
+            mascara_expurgada_md
             & (
                 conciliacao["Classificação"]
                 == "Improdutiva extra"
@@ -1300,15 +1499,14 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
 
     improdutivas_consideradas = max(
         improdutivas_totais
-        - improdutivas_expurgadas,
+        - improdutivas_expurgadas_md,
         0,
     )
 
-    # Para a MCI, uma improdutiva agendada expurgada deixa de
-    # penalizar o denominador do indicador.
+    # MCI permanece regida exclusivamente pelo motivo original.
     planejadas_elegiveis_mci = max(
         manutencoes_agendadas
-        - improdutivas_expurgadas_agendadas,
+        - improdutivas_expurgadas_agendadas_mci,
         0,
     )
 
@@ -1362,9 +1560,11 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         "Improdutivas agendadas": improdutivas_agendadas,
         "Improdutivas extras": improdutivas_extras,
         "Improdutivas consideradas MD": improdutivas_consideradas,
-        "Improdutivas expurgadas": improdutivas_expurgadas,
-        "Improdutivas expurgadas agendadas": improdutivas_expurgadas_agendadas,
-        "Improdutivas expurgadas extras": improdutivas_expurgadas_extras,
+        "Improdutivas expurgadas": improdutivas_expurgadas_md,
+        "Improdutivas expurgadas MD": improdutivas_expurgadas_md,
+        "Improdutivas expurgadas MCI": improdutivas_expurgadas_mci,
+        "Improdutivas expurgadas agendadas": improdutivas_expurgadas_agendadas_mci,
+        "Improdutivas expurgadas extras": improdutivas_expurgadas_extras_md,
         "Base MD": base_md,
         "Canceladas": canceladas,
         "No-show": no_show,
@@ -2510,10 +2710,14 @@ def carregar_consolidado(datas: list[str]) -> pd.DataFrame:
     if not partes:
         return pd.DataFrame()
 
-    return pd.concat(
+    consolidado = pd.concat(
         partes,
         ignore_index=True,
         sort=False,
+    )
+
+    return aplicar_revisoes_md(
+        consolidado
     )
 
 
@@ -3220,7 +3424,7 @@ def exibir_cards_indicadores(
             "(Executadas agendadas + Executadas extras + Improdutivas consideradas) "
             "× 100. São expurgadas da MD as improdutivas com os motivos "
             "'Problemas técnicos com sistemas' e 'Problemas técnicos com veículos'. "
-            "As OS continuam visíveis no detalhamento."
+            "As OS continuam visíveis no detalhamento. Quando houver revisão gerencial, somente a MD usa o motivo validado; o restante do sistema preserva o motivo original do OFS."
         ),
     )
     i3.metric(
@@ -5294,7 +5498,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.6.2 — Expurgo técnico retroativo em MCI e MD"
+        "Versão 2.6.3 — Revisão gerencial de motivo exclusiva da MD"
     )
 
 
@@ -7620,6 +7824,293 @@ elif pagina == "📉 Dashboard de Improdutividade":
         use_container_width=True,
     )
 
+    # =====================================================
+    # REVISÃO GERENCIAL EXCLUSIVA DA MD
+    # =====================================================
+    st.divider()
+    st.markdown("### ✍️ Revisão gerencial da MD")
+    st.caption(
+        "A revisão altera somente o motivo usado no cálculo da MD. "
+        "O motivo original do OFS, a classificação da OS, os arquivos "
+        "operacionais, MCI e as análises históricas permanecem intactos."
+    )
+
+    analise_revisao = analise.copy()
+
+    analise_revisao["OS_exibir"] = analise_revisao[
+        "OS_resultado"
+    ].apply(
+        lambda v: texto_limpo(v) or "Sem OS"
+    )
+
+    analise_revisao["Rotulo_revisao"] = analise_revisao.apply(
+        lambda linha: (
+            f"{texto_limpo(linha.get('Data Operacional', ''))} | "
+            f"OS {texto_limpo(linha.get('OS_exibir', ''))} | "
+            f"{texto_limpo(linha.get('Oficina', ''))} | "
+            f"{texto_limpo(linha.get('Razao_improdutiva', ''))}"
+        ),
+        axis=1,
+    )
+
+    opcoes_revisao = analise_revisao[
+        "Rotulo_revisao"
+    ].tolist()
+
+    if opcoes_revisao:
+        selecionada_revisao = st.selectbox(
+            "Selecione a OS para revisar",
+            opcoes_revisao,
+            key="md_revisao_os",
+        )
+
+        linha_revisao = analise_revisao[
+            analise_revisao["Rotulo_revisao"]
+            == selecionada_revisao
+        ].iloc[0]
+
+        rv1, rv2 = st.columns(2)
+
+        with rv1:
+            st.markdown(
+                "**Motivo original do OFS:**  \n"
+                + (
+                    texto_limpo(
+                        linha_revisao.get(
+                            "Razao_improdutiva",
+                            "",
+                        )
+                    )
+                    or "Não informado"
+                )
+            )
+            st.markdown(
+                "**Observação do técnico:**  \n"
+                + (
+                    texto_limpo(
+                        linha_revisao.get(
+                            "Observacao_tecnico_improdutiva",
+                            "",
+                        )
+                    )
+                    or "Sem observação"
+                )
+            )
+
+        with rv2:
+            st.markdown(
+                "**Motivo atualmente usado na MD:**  \n"
+                + (
+                    texto_limpo(
+                        linha_revisao.get(
+                            "Razao_improdutiva_md",
+                            "",
+                        )
+                    )
+                    or "Não informado"
+                )
+            )
+            if bool(
+                linha_revisao.get(
+                    "Revisao_MD",
+                    False,
+                )
+            ):
+                st.info(
+                    "Esta OS já possui revisão gerencial da MD."
+                )
+
+        motivos_existentes = sorted(
+            {
+                texto_limpo(v)
+                for v in base.get(
+                    "Razao_improdutiva",
+                    pd.Series(dtype=str),
+                )
+                if texto_limpo(v)
+            }
+        )
+
+        motivos_prioritarios = [
+            "Problemas técnicos com sistemas",
+            "Problemas técnicos com veículos",
+            "Veículo indisponível",
+            "Equipamento / material",
+            "Portaria / acesso",
+            "Cliente / agendamento",
+            "Técnico / capacidade",
+            "OS / cadastro / direcionamento",
+            "Sinistro",
+        ]
+
+        opcoes_motivo_md = []
+        for motivo in (
+            motivos_prioritarios
+            + motivos_existentes
+        ):
+            if motivo not in opcoes_motivo_md:
+                opcoes_motivo_md.append(motivo)
+
+        motivo_atual_md = texto_limpo(
+            linha_revisao.get(
+                "Razao_improdutiva_md",
+                "",
+            )
+        )
+
+        indice_default = (
+            opcoes_motivo_md.index(motivo_atual_md)
+            if motivo_atual_md in opcoes_motivo_md
+            else 0
+        )
+
+        novo_motivo_md = st.selectbox(
+            "Motivo validado para a MD",
+            opcoes_motivo_md,
+            index=indice_default,
+            key="md_revisao_motivo",
+        )
+
+        justificativa_md = st.text_area(
+            "Justificativa da revisão",
+            value=texto_limpo(
+                linha_revisao.get(
+                    "Justificativa_revisao_MD",
+                    "",
+                )
+            ),
+            placeholder=(
+                "Ex.: observação informa carro sem motor; "
+                "reclassificado para problema técnico com veículo."
+            ),
+            key="md_revisao_justificativa",
+        )
+
+        revisor_md = st.text_input(
+            "Responsável pela revisão",
+            value=texto_limpo(
+                linha_revisao.get(
+                    "Revisor_MD",
+                    "",
+                )
+            ),
+            key="md_revisao_responsavel",
+        )
+
+        ac1, ac2 = st.columns(2)
+
+        with ac1:
+            if st.button(
+                "💾 Salvar revisão da MD",
+                type="primary",
+                use_container_width=True,
+                key="salvar_revisao_md",
+            ):
+                if not texto_limpo(justificativa_md):
+                    st.error(
+                        "Informe a justificativa da revisão."
+                    )
+                else:
+                    salvar_revisao_md(
+                        texto_limpo(
+                            linha_revisao.get(
+                                "Data Operacional",
+                                "",
+                            )
+                        ),
+                        texto_limpo(
+                            linha_revisao.get(
+                                "Chave Atendimento",
+                                "",
+                            )
+                        ),
+                        texto_limpo(
+                            linha_revisao.get(
+                                "Razao_improdutiva",
+                                "",
+                            )
+                        ),
+                        novo_motivo_md,
+                        justificativa_md,
+                        revisor_md,
+                    )
+                    st.success(
+                        "Revisão salva. A MD será recalculada "
+                        "automaticamente em todas as visões."
+                    )
+                    st.rerun()
+
+        with ac2:
+            if bool(
+                linha_revisao.get(
+                    "Revisao_MD",
+                    False,
+                )
+            ):
+                if st.button(
+                    "↩️ Remover revisão e voltar ao motivo OFS",
+                    use_container_width=True,
+                    key="remover_revisao_md",
+                ):
+                    excluir_revisao_md(
+                        texto_limpo(
+                            linha_revisao.get(
+                                "Data Operacional",
+                                "",
+                            )
+                        ),
+                        texto_limpo(
+                            linha_revisao.get(
+                                "Chave Atendimento",
+                                "",
+                            )
+                        ),
+                    )
+                    st.success(
+                        "Revisão removida. A MD voltou a usar "
+                        "o motivo original do OFS."
+                    )
+                    st.rerun()
+
+    revisoes_ativas = analise[
+        analise.get(
+            "Revisao_MD",
+            pd.Series(False, index=analise.index),
+        ).fillna(False).astype(bool)
+    ].copy()
+
+    if not revisoes_ativas.empty:
+        st.markdown("#### Revisões MD ativas no filtro atual")
+        colunas_revisoes = [
+            coluna
+            for coluna in [
+                "Data Operacional",
+                "OS_resultado",
+                "Oficina",
+                "Consultor",
+                "Razao_improdutiva",
+                "Razao_improdutiva_md",
+                "Justificativa_revisao_MD",
+                "Revisor_MD",
+            ]
+            if coluna in revisoes_ativas.columns
+        ]
+        st.dataframe(
+            revisoes_ativas[
+                colunas_revisoes
+            ].rename(
+                columns={
+                    "OS_resultado": "OS",
+                    "Razao_improdutiva": "Motivo OFS",
+                    "Razao_improdutiva_md": "Motivo validado MD",
+                    "Justificativa_revisao_MD": "Justificativa",
+                    "Revisor_MD": "Revisor",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
     # -----------------------------
     # DETALHAMENTO
     # -----------------------------
@@ -7643,6 +8134,10 @@ elif pagina == "📉 Dashboard de Improdutividade":
         "Cliente_resultado",
         "Cidade_resultado",
         "Razao_improdutiva",
+        "Razao_improdutiva_md",
+        "Revisao_MD",
+        "Justificativa_revisao_MD",
+        "Revisor_MD",
         "Observacao_tecnico_improdutiva",
         "Qualidade apontamento",
         "Motivo sugerido",
@@ -7671,6 +8166,10 @@ elif pagina == "📉 Dashboard de Improdutividade":
         columns={
             "OS_resultado": "OS",
             "Razao_improdutiva": "Razão da Improdutiva",
+            "Razao_improdutiva_md": "Motivo validado para MD",
+            "Revisao_MD": "Revisão MD ativa",
+            "Justificativa_revisao_MD": "Justificativa revisão MD",
+            "Revisor_MD": "Revisor MD",
             "Observacao_tecnico_improdutiva": (
                 "Observação do Técnico"
             ),
