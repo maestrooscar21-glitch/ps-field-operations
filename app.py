@@ -5523,7 +5523,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.6.4 — Tratativa MD por consultor, técnico e classificação gerencial"
+        "Versão 2.6.5 — Fila operacional de revisão MD com conclusão automática"
     )
 
 
@@ -7885,21 +7885,23 @@ elif pagina == "📉 Dashboard de Improdutividade":
     st.divider()
     st.markdown("### ✍️ Tratativa gerencial da MD")
     st.caption(
-        "A tratativa altera somente a MD. O apontamento original do OFS, "
-        "os arquivos operacionais, a MCI e as contagens históricas "
-        "continuam intactos."
+        "A fila abaixo é uma fila de trabalho: depois de salvar a tratativa, "
+        "a OS sai da lista pendente e permanece registrada no banco/histórico. "
+        "O apontamento original do OFS, os arquivos operacionais, a MCI e as "
+        "contagens históricas continuam intactos."
     )
 
     analise_revisao = analise.copy()
 
+    mascara_revisada = analise_revisao.get(
+        "Revisao_MD",
+        pd.Series(False, index=analise_revisao.index),
+    ).fillna(False).astype(bool)
+
     total_carteira = len(analise_revisao)
-    revisadas = int(
-        analise_revisao.get(
-            "Revisao_MD",
-            pd.Series(False, index=analise_revisao.index),
-        ).fillna(False).astype(bool).sum()
-    )
+    revisadas = int(mascara_revisada.sum())
     pendentes = max(total_carteira - revisadas, 0)
+
     no_show_tecnico = int(
         (
             analise_revisao.get(
@@ -7909,33 +7911,76 @@ elif pagina == "📉 Dashboard de Improdutividade":
         ).sum()
     )
 
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("OS no filtro", total_carteira)
-    r2.metric("Pendentes", pendentes)
-    r3.metric("Revisadas", revisadas)
-    r4.metric("No-show técnico", no_show_tecnico)
+    # Estado da aba/fila
+    if "md_fila_status" not in st.session_state:
+        st.session_state["md_fila_status"] = "Pendentes"
+
+    b1, b2, b3, b4 = st.columns(4)
+
+    with b1:
+        if st.button(
+            f"🟠 Pendentes ({pendentes})",
+            use_container_width=True,
+            type=(
+                "primary"
+                if st.session_state["md_fila_status"] == "Pendentes"
+                else "secondary"
+            ),
+            key="btn_md_pendentes",
+        ):
+            st.session_state["md_fila_status"] = "Pendentes"
+            st.rerun()
+
+    with b2:
+        if st.button(
+            f"✅ Revisadas ({revisadas})",
+            use_container_width=True,
+            type=(
+                "primary"
+                if st.session_state["md_fila_status"] == "Revisadas"
+                else "secondary"
+            ),
+            key="btn_md_revisadas",
+        ):
+            st.session_state["md_fila_status"] = "Revisadas"
+            st.rerun()
+
+    with b3:
+        if st.button(
+            f"📋 Todas ({total_carteira})",
+            use_container_width=True,
+            type=(
+                "primary"
+                if st.session_state["md_fila_status"] == "Todas"
+                else "secondary"
+            ),
+            key="btn_md_todas",
+        ):
+            st.session_state["md_fila_status"] = "Todas"
+            st.rerun()
+
+    with b4:
+        st.metric("No-show técnico", no_show_tecnico)
 
     st.caption(
         "Os filtros de Consultor, Oficina e Técnico/Recurso acima também "
         "controlam esta fila. Assim cada consultor trata apenas a sua carteira."
     )
 
-    situacao = st.radio(
-        "Situação",
-        ["Todas", "Pendentes", "Revisadas"],
-        horizontal=True,
-        key="md_status_revisao",
-    )
+    fila_status = st.session_state["md_fila_status"]
 
-    mascara_revisada = analise_revisao.get(
-        "Revisao_MD",
-        pd.Series(False, index=analise_revisao.index),
-    ).fillna(False).astype(bool)
-
-    if situacao == "Pendentes":
-        analise_revisao = analise_revisao[~mascara_revisada].copy()
-    elif situacao == "Revisadas":
-        analise_revisao = analise_revisao[mascara_revisada].copy()
+    # Regra principal:
+    # - Pendentes = fila de trabalho.
+    # - Revisadas = histórico das tratativas.
+    # - Todas = visão administrativa, não fila operacional.
+    if fila_status == "Pendentes":
+        analise_revisao = analise_revisao[
+            ~mascara_revisada
+        ].copy()
+    elif fila_status == "Revisadas":
+        analise_revisao = analise_revisao[
+            mascara_revisada
+        ].copy()
 
     analise_revisao["OS_exibir"] = analise_revisao[
         "OS_resultado"
@@ -7954,12 +7999,21 @@ elif pagina == "📉 Dashboard de Improdutividade":
     opcoes = analise_revisao["Rotulo_revisao"].tolist()
 
     if not opcoes:
-        st.info("Nenhuma OS encontrada nessa situação.")
+        if fila_status == "Pendentes":
+            st.success("Nenhuma OS pendente de revisão neste filtro.")
+        elif fila_status == "Revisadas":
+            st.info("Nenhuma OS revisada neste filtro.")
+        else:
+            st.info("Nenhuma OS encontrada neste filtro.")
     else:
         selecionada = st.selectbox(
-            "Selecione a OS para tratar",
+            (
+                "Selecione a OS para tratar"
+                if fila_status == "Pendentes"
+                else "Selecione a OS para consultar"
+            ),
             opcoes,
-            key="md_revisao_os",
+            key=f"md_revisao_os_{fila_status}",
         )
 
         linha = analise_revisao[
@@ -7970,7 +8024,10 @@ elif pagina == "📉 Dashboard de Improdutividade":
         with c1:
             st.markdown(
                 "**Motivo OFS:**  \n"
-                + (texto_limpo(linha.get("Razao_improdutiva", "")) or "Não informado")
+                + (
+                    texto_limpo(linha.get("Razao_improdutiva", ""))
+                    or "Não informado"
+                )
             )
             st.markdown(
                 "**Observação do técnico:**  \n"
@@ -7983,17 +8040,26 @@ elif pagina == "📉 Dashboard de Improdutividade":
             )
             st.markdown(
                 "**Técnico / recurso:**  \n"
-                + (texto_limpo(linha.get("Tecnico_recurso", "")) or "Não informado")
+                + (
+                    texto_limpo(linha.get("Tecnico_recurso", ""))
+                    or "Não informado"
+                )
             )
 
         with c2:
             st.markdown(
                 "**Consultor:**  \n"
-                + (texto_limpo(linha.get("Consultor", "")) or "Não definido")
+                + (
+                    texto_limpo(linha.get("Consultor", ""))
+                    or "Não definido"
+                )
             )
             st.markdown(
                 "**Oficina:**  \n"
-                + (texto_limpo(linha.get("Oficina", "")) or "Não definida")
+                + (
+                    texto_limpo(linha.get("Oficina", ""))
+                    or "Não definida"
+                )
             )
             st.markdown(
                 "**Classificação MD atual:**  \n"
@@ -8017,24 +8083,31 @@ elif pagina == "📉 Dashboard de Improdutividade":
             )
             or "Improdutiva"
         )
-        idx = classificacoes.index(atual) if atual in classificacoes else 0
+        idx = (
+            classificacoes.index(atual)
+            if atual in classificacoes
+            else 0
+        )
 
         classificacao_md = st.selectbox(
             "Classificação gerencial para a MD",
             classificacoes,
             index=idx,
+            disabled=(fila_status == "Revisadas"),
             help=(
                 "No-show técnico, No-show cliente e Cancelada retiram a OS "
                 "do universo da MD, mas não alteram o registro original."
             ),
-            key="md_revisao_classificacao",
+            key=f"md_revisao_classificacao_{fila_status}",
         )
 
         motivo_original = texto_limpo(
             linha.get("Razao_improdutiva", "")
         )
         motivo_md = (
-            texto_limpo(linha.get("Razao_improdutiva_md", ""))
+            texto_limpo(
+                linha.get("Razao_improdutiva_md", "")
+            )
             or motivo_original
         )
 
@@ -8049,6 +8122,7 @@ elif pagina == "📉 Dashboard de Improdutividade":
             "OS / cadastro / direcionamento",
             "Sinistro",
         ]
+
         for valor in base.get(
             "Razao_improdutiva",
             pd.Series(dtype=str),
@@ -8061,18 +8135,25 @@ elif pagina == "📉 Dashboard de Improdutividade":
             motivos.insert(0, motivo_md)
 
         novo_motivo_md = motivo_md
+
         if classificacao_md == "Improdutiva":
-            idx_motivo = motivos.index(motivo_md) if motivo_md in motivos else 0
+            idx_motivo = (
+                motivos.index(motivo_md)
+                if motivo_md in motivos
+                else 0
+            )
             novo_motivo_md = st.selectbox(
                 "Motivo validado para a MD",
                 motivos,
                 index=idx_motivo,
-                key="md_revisao_motivo",
+                disabled=(fila_status == "Revisadas"),
+                key=f"md_revisao_motivo_{fila_status}",
             )
         else:
             st.info(
-                f"Para a MD, esta OS será tratada como **{classificacao_md}** "
-                "e deixará de compor a improdutividade do indicador."
+                f"Para a MD, esta OS está sendo tratada como "
+                f"**{classificacao_md}** e não compõe a improdutividade "
+                "do indicador."
             )
 
         justificativa = st.text_area(
@@ -8080,51 +8161,96 @@ elif pagina == "📉 Dashboard de Improdutividade":
             value=texto_limpo(
                 linha.get("Justificativa_revisao_MD", "")
             ),
-            key="md_revisao_justificativa",
+            disabled=(fila_status == "Revisadas"),
+            key=f"md_revisao_justificativa_{fila_status}",
         )
 
         revisor = st.text_input(
             "Responsável pela revisão",
-            value=texto_limpo(linha.get("Revisor_MD", "")),
-            key="md_revisao_responsavel",
+            value=texto_limpo(
+                linha.get("Revisor_MD", "")
+            ),
+            disabled=(fila_status == "Revisadas"),
+            key=f"md_revisao_responsavel_{fila_status}",
         )
 
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button(
-                "💾 Salvar tratativa da MD",
-                type="primary",
-                use_container_width=True,
-                key="salvar_revisao_md",
-            ):
-                if not texto_limpo(justificativa):
-                    st.error("Informe a justificativa da tratativa.")
-                else:
-                    salvar_revisao_md(
-                        texto_limpo(linha.get("Data Operacional", "")),
-                        texto_limpo(linha.get("Chave Atendimento", "")),
-                        motivo_original,
-                        classificacao_md,
-                        novo_motivo_md,
-                        justificativa,
-                        revisor,
-                    )
-                    st.success("Tratativa salva e MD recalculada.")
-                    st.rerun()
+        if fila_status != "Revisadas":
+            s1, s2 = st.columns(2)
 
-        with b2:
-            if bool(linha.get("Revisao_MD", False)):
+            with s1:
                 if st.button(
-                    "↩️ Voltar ao apontamento OFS",
+                    "💾 Salvar e concluir revisão",
+                    type="primary",
                     use_container_width=True,
-                    key="remover_revisao_md",
+                    key=f"salvar_revisao_md_{fila_status}",
                 ):
-                    excluir_revisao_md(
-                        texto_limpo(linha.get("Data Operacional", "")),
-                        texto_limpo(linha.get("Chave Atendimento", "")),
-                    )
-                    st.success("Tratativa removida.")
-                    st.rerun()
+                    if not texto_limpo(justificativa):
+                        st.error(
+                            "Informe a justificativa da tratativa."
+                        )
+                    else:
+                        salvar_revisao_md(
+                            texto_limpo(
+                                linha.get("Data Operacional", "")
+                            ),
+                            texto_limpo(
+                                linha.get("Chave Atendimento", "")
+                            ),
+                            motivo_original,
+                            classificacao_md,
+                            novo_motivo_md,
+                            justificativa,
+                            revisor,
+                        )
+
+                        # Após concluir, volta para a fila de pendentes.
+                        # A OS recém-revisada desaparece imediatamente dessa fila.
+                        st.session_state["md_fila_status"] = "Pendentes"
+                        st.success(
+                            "Revisão concluída. A OS saiu da fila pendente "
+                            "e ficou registrada no histórico."
+                        )
+                        st.rerun()
+
+            with s2:
+                if bool(linha.get("Revisao_MD", False)):
+                    if st.button(
+                        "↩️ Remover tratativa e reabrir OS",
+                        use_container_width=True,
+                        key=f"remover_revisao_md_{fila_status}",
+                    ):
+                        excluir_revisao_md(
+                            texto_limpo(
+                                linha.get("Data Operacional", "")
+                            ),
+                            texto_limpo(
+                                linha.get("Chave Atendimento", "")
+                            ),
+                        )
+                        st.session_state["md_fila_status"] = "Pendentes"
+                        st.success(
+                            "Tratativa removida. A OS voltou para a fila pendente."
+                        )
+                        st.rerun()
+        else:
+            if st.button(
+                "↩️ Reabrir esta OS para nova revisão",
+                use_container_width=True,
+                key="reabrir_revisao_md",
+            ):
+                excluir_revisao_md(
+                    texto_limpo(
+                        linha.get("Data Operacional", "")
+                    ),
+                    texto_limpo(
+                        linha.get("Chave Atendimento", "")
+                    ),
+                )
+                st.session_state["md_fila_status"] = "Pendentes"
+                st.success(
+                    "OS reaberta e devolvida à fila pendente."
+                )
+                st.rerun()
 
     revisoes_ativas = analise[
         analise.get(
@@ -8134,9 +8260,10 @@ elif pagina == "📉 Dashboard de Improdutividade":
     ].copy()
 
     if not revisoes_ativas.empty:
-        st.markdown("#### Tratativas MD ativas no filtro atual")
+        st.markdown("#### Histórico de tratativas no filtro atual")
         cols = [
-            c for c in [
+            c
+            for c in [
                 "Data Operacional",
                 "OS_resultado",
                 "Consultor",
@@ -8147,7 +8274,8 @@ elif pagina == "📉 Dashboard de Improdutividade":
                 "Razao_improdutiva_md",
                 "Justificativa_revisao_MD",
                 "Revisor_MD",
-            ] if c in revisoes_ativas.columns
+            ]
+            if c in revisoes_ativas.columns
         ]
         st.dataframe(
             revisoes_ativas[cols].rename(
