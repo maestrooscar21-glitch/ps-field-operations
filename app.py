@@ -3393,10 +3393,11 @@ def exibir_cards_indicadores(
         (
             "OS Perdidas",
             "OS Perdidas",
-            "OS Perdidas",
+            "OS Perdida",
             (
                 "Manutenções do planejamento-base em que o atendimento não "
-                "foi classificado como OS Perdida. Taxa de perda de OS = OS Perdidas ÷ "
+                "teve o desfecho localizado pelas regras do painel. "
+                "Taxa de perda de OS = OS Perdidas ÷ "
                 "Manutenções agendadas × 100."
             ),
         ),
@@ -3492,6 +3493,11 @@ def filtrar_detalhes(
     conciliacao: pd.DataFrame,
     filtro: str,
 ) -> pd.DataFrame:
+    # Compatibilidade da nomenclatura do card (plural) com a
+    # classificação das linhas da conciliação (singular).
+    if filtro == "OS Perdidas":
+        filtro = "OS Perdida"
+
     if filtro in {"Planejadas", "Manutenções agendadas"}:
         if "Origem Agendamento" in conciliacao.columns:
             return conciliacao[
@@ -5523,7 +5529,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.6.6 — Fila operacional de revisão MD com conclusão automática"
+        "Versão 2.6.7 — Fila operacional de revisão MD com conclusão automática"
     )
 
 
