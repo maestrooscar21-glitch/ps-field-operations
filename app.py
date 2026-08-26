@@ -951,7 +951,7 @@ def conciliar_bases(
     # Auditoria de substituição de OS:
     # se a OS planejada não aparece pelo mesmo atendimento, procuramos
     # outra OS no resultado com o MESMO Ticket Jira + MESMA placa.
-    # Nessa situação, não declaramos no-show automaticamente.
+    # Nessa situação, não declaramos perda de OS automaticamente.
     def chave_ticket_placa(ticket, placa) -> str:
         ticket_norm = normalizar_texto(ticket)
         placa_norm = normalizar_texto(placa)
@@ -1082,7 +1082,7 @@ def conciliar_bases(
                     )
                 ):
                     return "Possível substituição de OS"
-                return "No-show"
+                return "OS Perdida"
 
             if origem_merge == "right_only":
                 if status_improdutivo(status_resultado):
@@ -1131,7 +1131,7 @@ def conciliar_bases(
                     )
                 ):
                     return "Possível substituição de OS"
-                return "No-show"
+                return "OS Perdida"
             return "Encaixe não realizado"
 
         if origem_merge == "right_only":
@@ -1237,20 +1237,20 @@ def conciliar_bases(
             return (
                 "A OS agendada não apareceu pelo mesmo atendimento, mas "
                 "foi localizada outra OS no resultado com o mesmo Ticket "
-                "Jira + mesma placa. O caso foi retirado do no-show para "
+                "Jira + mesma placa. O caso foi retirado de OS Perdidas para "
                 "auditoria de possível troca/substituição de OS."
             )
-        if classificacao == "No-show":
+        if classificacao == "OS Perdida":
             return (
-                "Manutenção estava agendada antes do dia, a própria OS não "
-                "apareceu no resultado e nenhuma outra OS com o mesmo Ticket "
-                "Jira + mesma placa foi localizada. Classificada como "
-                "no-show provável."
+                "Manutenção estava no planejamento-base, mas a própria OS não apareceu "
+                "no resultado e nenhuma substituição pelo mesmo Ticket Jira + "
+                "placa foi localizada. O painel registra como OS Perdida; a "
+                "causa não é atribuída automaticamente ao técnico."
             )
         if classificacao == "Encaixe não realizado":
             return (
                 "A manutenção surgiu no próprio dia como extra/encaixe "
-                "e não apareceu no resultado; não conta como no-show."
+                "e não apareceu no resultado; não conta como OS Perdida."
             )
         if classificacao == "Retirada do agendamento":
             return (
@@ -1418,7 +1418,7 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
             "Cancelada no agendamento",
             "Retirada do agendamento",
             "Possível substituição de OS",
-            "No-show",
+            "OS Perdida",
             "Status intermediário agendado",
         }
         manutencoes_agendadas = int(
@@ -1544,7 +1544,7 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
     no_show = int(
         (
             conciliacao["Classificação"]
-            == "No-show"
+            == "OS Perdida"
         ).sum()
     )
 
@@ -1592,7 +1592,7 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         "Improdutivas expurgadas extras": improdutivas_expurgadas_extras_md,
         "Base MD": base_md,
         "Canceladas": canceladas,
-        "No-show": no_show,
+        "OS Perdidas": no_show,
         "Possíveis substituições de OS": int(
             (
                 conciliacao["Classificação"]
@@ -1602,9 +1602,9 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         "Executadas extras": executadas_extras,
         "MCI": mci,
         "MD": md,
-        # No-show e cancelamento permanecem sobre o planejamento-base
+        # OS Perdidas e cancelamento permanecem sobre o planejamento-base
         # original. A nova regra altera somente MCI e MD.
-        "Índice no-show": (
+        "Taxa de perda de OS": (
             no_show
             / manutencoes_agendadas
             * 100
@@ -3357,7 +3357,7 @@ def exibir_cards_indicadores(
             "Manutenções agendadas",
             (
                 "Total de manutenções reconhecidas na fotografia-base do "
-                "planejamento. É o denominador da MCI, do no-show e do "
+                "planejamento. É o denominador da MCI, da perda de OS e do "
                 "cancelamento."
             ),
         ),
@@ -3391,12 +3391,12 @@ def exibir_cards_indicadores(
             ),
         ),
         (
-            "No-show",
-            "No-show",
-            "No-show",
+            "OS Perdidas",
+            "OS Perdidas",
+            "OS Perdidas",
             (
                 "Manutenções do planejamento-base em que o atendimento não "
-                "ocorreu por no-show. Índice de no-show = No-show ÷ "
+                "foi classificado como OS Perdida. Taxa de perda de OS = OS Perdidas ÷ "
                 "Manutenções agendadas × 100."
             ),
         ),
@@ -3453,11 +3453,11 @@ def exibir_cards_indicadores(
         ),
     )
     i3.metric(
-        "Índice de no-show",
-        f'{indicadores["Índice no-show"]:.1f}%',
+        "Taxa de perda de OS",
+        f'{indicadores["Taxa de perda de OS"]:.1f}%',
         help=(
-            "Percentual do planejamento-base perdido por no-show. "
-            "Fórmula: No-show ÷ Manutenções agendadas × 100."
+            "Percentual do planejamento-base classificado como OS Perdida. "
+            "Fórmula: OS Perdidas ÷ Manutenções agendadas × 100."
         ),
     )
     i4.metric(
@@ -3506,7 +3506,7 @@ def filtrar_detalhes(
             "Cancelada no agendamento",
             "Retirada do agendamento",
             "Possível substituição de OS",
-            "No-show",
+            "OS Perdida",
             "Status intermediário agendado",
         ]
         return conciliacao[
@@ -4668,7 +4668,7 @@ def exibir_diagnostico_md_semanal(base_semana: pd.DataFrame, inicio_semana, fim_
         "Leitura executiva da improdutividade. A MD expurga problemas técnicos "
         "com sistemas e problemas técnicos com veículos, mas o ranking de motivos "
         "continua exibindo todas as improdutivas para análise e plano de ação. "
-        "Canceladas e no-show não entram na MD."
+        "Canceladas e OS Perdidas não entram na MD."
     )
 
     indicadores = calcular_indicadores(base_semana)
@@ -5029,8 +5029,8 @@ def status_resultado_follow(
         ]
     ):
         status = "Cancelada"
-    elif "No-show" in classes:
-        status = "No-show"
+    elif "OS Perdida" in classes:
+        status = "OS Perdida"
     elif "Possível substituição de OS" in classes:
         status = "Possível substituição de OS"
     else:
@@ -5141,7 +5141,7 @@ def classificar_coerencia_follow(
             ),
         )
 
-    if status_resultado == "No-show":
+    if status_resultado == "OS Perdida":
         if tem_impedimento:
             return (
                 "Risco informado / não executada",
@@ -5151,10 +5151,10 @@ def classificar_coerencia_follow(
                 ),
             )
         return (
-            "No-show não antecipado",
+            "OS Perdida não antecipada",
             (
                 "A oficina informou que estava tudo OK, mas a manutenção "
-                "foi classificada como no-show."
+                "foi classificada como OS Perdida."
             ),
         )
 
@@ -5523,7 +5523,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.6.5 — Fila operacional de revisão MD com conclusão automática"
+        "Versão 2.6.6 — Fila operacional de revisão MD com conclusão automática"
     )
 
 
@@ -5967,7 +5967,7 @@ elif pagina == "📊 Dashboard Executivo":
                         indicadores_semana["Executadas extras"]
                     ),
                     "Improdutivas": indicadores_semana["Improdutivas"],
-                    "No-show": indicadores_semana["No-show"],
+                    "OS Perdidas": indicadores_semana["OS Perdidas"],
                     "Canceladas": indicadores_semana["Canceladas"],
                     "MCI": indicadores_semana["MCI"],
                     "MD": indicadores_semana["MD"],
@@ -5993,7 +5993,7 @@ elif pagina == "📊 Dashboard Executivo":
                 "Executadas agendadas",
                 "Executadas extras",
                 "Improdutivas",
-                "No-show",
+                "OS Perdidas",
                 "Canceladas",
                 "MCI",
                 "MD",
@@ -6073,8 +6073,8 @@ elif pagina == "📊 Dashboard Executivo":
             indicadores_sel["Improdutivas"],
         )
         s6.metric(
-            "No-show",
-            indicadores_sel["No-show"],
+            "OS Perdidas",
+            indicadores_sel["OS Perdidas"],
         )
         s7.metric(
             "Canceladas",
@@ -6372,7 +6372,7 @@ elif pagina == "👤 Painel do Consultor":
                         indicadores_semana["Executadas extras"]
                     ),
                     "Improdutivas": indicadores_semana["Improdutivas"],
-                    "No-show": indicadores_semana["No-show"],
+                    "OS Perdidas": indicadores_semana["OS Perdidas"],
                     "Canceladas": indicadores_semana["Canceladas"],
                     "MCI": indicadores_semana["MCI"],
                     "MD": indicadores_semana["MD"],
@@ -6399,7 +6399,7 @@ elif pagina == "👤 Painel do Consultor":
                     "Executadas agendadas",
                     "Executadas extras",
                     "Improdutivas",
-                    "No-show",
+                    "OS Perdidas",
                     "Canceladas",
                     "MCI",
                     "MD",
@@ -6495,8 +6495,8 @@ elif pagina == "👤 Painel do Consultor":
             indicadores_semana_consultor["Improdutivas"],
         )
         sw6.metric(
-            "No-show",
-            indicadores_semana_consultor["No-show"],
+            "OS Perdidas",
+            indicadores_semana_consultor["OS Perdidas"],
         )
         sw7.metric(
             "Canceladas",
@@ -6653,7 +6653,7 @@ elif pagina == "👤 Painel do Consultor":
                 "Improdutivas": ind["Improdutivas"],
                 "Improdutivas consideradas": ind["Improdutivas consideradas MD"],
                 "Expurgadas": ind["Improdutivas expurgadas"],
-                "No_show": ind["No-show"],
+                "OS_Perdidas": ind["OS Perdidas"],
                 "Canceladas": ind["Canceladas"],
                 "MCI (%)": ind["MCI"],
                 "MD (%)": ind["MD"],
@@ -7404,7 +7404,7 @@ elif pagina == "📉 Dashboard de Improdutividade":
     # =====================================================
     st.markdown("### 🧭 Rankings e diagnóstico MD")
     st.caption(
-        "Detalhamento do período filtrado. Canceladas e no-show não entram "
+        "Detalhamento do período filtrado. Canceladas e OS Perdidas não entram "
         "na MD. O ranking crítico e o reconhecimento das oficinas com 0% "
         "ficam separados para facilitar a leitura."
     )
@@ -8624,7 +8624,7 @@ elif pagina == "🔄 Follow × Resultado OFS":
         "Divergência do Follow",
         "Improdutiva não antecipada",
         "Risco informado, motivo diferente",
-        "No-show não antecipado",
+        "OS Perdida não antecipada",
         "Cancelamento não antecipado",
         "Requer auditoria de OS",
     ]
