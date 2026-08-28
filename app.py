@@ -5768,7 +5768,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.7.1 — Sanitização + Estoque OFS + Curva ABC"
+        "Versão 2.7.2 — Correção da página Estoque + Sanitização"
     )
 
 
@@ -6127,6 +6127,249 @@ elif pagina == "🗂 Bases Salvas":
         )
         st.success("Base excluída.")
         st.rerun()
+
+
+# =========================================================
+# ESTOQUE & EQUIPAMENTOS
+# =========================================================
+
+elif pagina == "📦 Estoque & Equipamentos":
+    exigir_supabase()
+
+    st.subheader("📦 Estoque & Equipamentos")
+    st.caption(
+        "Visão inicial baseada no consumo registrado pelo OFS. "
+        "Nesta etapa ainda não exibimos saldo atual: o saldo projetado será habilitado "
+        "após o primeiro inventário físico validado da oficina."
+    )
+
+    consumos = carregar_consumos_estoque()
+
+    if consumos.empty:
+        st.info(
+            "Ainda não há consumo de equipamentos importado. "
+            "Vá em 📥 Dados → Importações → 📦 Equipamentos Trocados — OFS "
+            "para fazer a primeira carga."
+        )
+        st.stop()
+
+    base = consumos.copy()
+    base = base[base["data_execucao"].notna()].copy()
+
+    if base.empty:
+        st.warning("Há registros no estoque, mas nenhum possui data de execução válida.")
+        st.stop()
+
+    data_min = base["data_execucao"].min().date()
+    data_max = base["data_execucao"].max().date()
+
+    f1, f2, f3 = st.columns([1.2, 1.5, 1.7])
+
+    with f1:
+        periodo = st.date_input(
+            "Período",
+            value=(data_min, data_max),
+            min_value=data_min,
+            max_value=data_max,
+            key="estoque_periodo",
+        )
+
+    if isinstance(periodo, (tuple, list)) and len(periodo) == 2:
+        inicio, fim = periodo
+    else:
+        inicio = fim = periodo
+
+    oficinas = sorted(
+        x for x in base.get("oficina", pd.Series(dtype=str)).fillna("").astype(str).unique()
+        if texto_limpo(x)
+    )
+    with f2:
+        oficina_sel = st.selectbox(
+            "Oficina",
+            ["Todas"] + oficinas,
+            key="estoque_oficina_filtro",
+        )
+
+    itens = (
+        base[["codigo_item", "nome_item"]]
+        .fillna("")
+        .drop_duplicates()
+        .assign(
+            rotulo=lambda d: d.apply(
+                lambda r: f"{texto_limpo(r['codigo_item'])} — {texto_limpo(r['nome_item'])}", axis=1
+            )
+        )
+    )
+    itens = itens[itens["rotulo"].str.strip(" —") != ""].sort_values("rotulo")
+    mapa_item = dict(zip(itens["rotulo"], itens["codigo_item"]))
+
+    with f3:
+        item_sel = st.selectbox(
+            "Equipamento",
+            ["Todos"] + itens["rotulo"].tolist(),
+            key="estoque_item_filtro",
+        )
+
+    filtrada = base[
+        (base["data_execucao"].dt.date >= inicio)
+        & (base["data_execucao"].dt.date <= fim)
+    ].copy()
+
+    if oficina_sel != "Todas":
+        filtrada = filtrada[filtrada["oficina"] == oficina_sel]
+
+    if item_sel != "Todos":
+        filtrada = filtrada[filtrada["codigo_item"] == mapa_item[item_sel]]
+
+    if filtrada.empty:
+        st.warning("Nenhum consumo encontrado para os filtros selecionados.")
+        st.stop()
+
+    qtd_total = float(filtrada["quantidade"].sum())
+    os_unicas = int(
+        filtrada.get("os", pd.Series(dtype=str)).fillna("").astype(str)
+        .loc[lambda s: s.str.strip() != ""].nunique()
+    )
+    oficinas_ativas = int(
+        filtrada.get("oficina", pd.Series(dtype=str)).fillna("").astype(str)
+        .loc[lambda s: s.str.strip() != ""].nunique()
+    )
+    itens_distintos = int(
+        filtrada.get("codigo_item", pd.Series(dtype=str)).fillna("").astype(str)
+        .loc[lambda s: s.str.strip() != ""].nunique()
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Equipamentos consumidos", f"{qtd_total:,.0f}".replace(",", "."))
+    m2.metric("OS com consumo", os_unicas)
+    m3.metric("Oficinas", oficinas_ativas)
+    m4.metric("Itens distintos", itens_distintos)
+
+    st.divider()
+
+    aba_resumo, aba_abc, aba_oficinas, aba_motivos, aba_detalhes = st.tabs(
+        [
+            "📊 Consumo por item",
+            "🅰️ Curva ABC",
+            "🏢 Por oficina",
+            "📦 Motivos de envio",
+            "🔎 Detalhes",
+        ]
+    )
+
+    consumo_item = (
+        filtrada.groupby(["codigo_item", "nome_item"], dropna=False)["quantidade"]
+        .sum()
+        .reset_index(name="Quantidade")
+        .sort_values("Quantidade", ascending=False)
+    )
+
+    with aba_resumo:
+        st.markdown("### Equipamentos mais consumidos")
+        tabela_item = consumo_item.rename(
+            columns={"codigo_item": "Código", "nome_item": "Equipamento"}
+        )
+        st.dataframe(
+            tabela_item,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        grafico_item = tabela_item.head(15).sort_values("Quantidade", ascending=True)
+        if not grafico_item.empty:
+            fig = px.bar(
+                grafico_item,
+                x="Quantidade",
+                y="Equipamento",
+                orientation="h",
+                title="Top 15 equipamentos por consumo",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    with aba_abc:
+        st.markdown("### Curva ABC de consumo")
+        st.caption(
+            "Regra inicial: A até 80% do consumo acumulado, B até 95% e C no restante. "
+            "Essa regra poderá ser ajustada depois da validação operacional."
+        )
+        abc = classificar_curva_abc(consumo_item)
+        abc_exibir = abc.rename(
+            columns={
+                "codigo_item": "Código",
+                "nome_item": "Equipamento",
+                "% acumulado": "% acumulado",
+            }
+        )
+        abc_exibir["% acumulado"] = abc_exibir["% acumulado"].round(1)
+        st.dataframe(
+            abc_exibir[["Código", "Equipamento", "Quantidade", "% acumulado", "Curva ABC"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with aba_oficinas:
+        st.markdown("### Consumo por oficina")
+        por_oficina = (
+            filtrada.groupby("oficina", dropna=False)["quantidade"]
+            .sum()
+            .reset_index(name="Quantidade")
+            .rename(columns={"oficina": "Oficina"})
+            .sort_values("Quantidade", ascending=False)
+        )
+        st.dataframe(por_oficina, use_container_width=True, hide_index=True)
+
+        grafico_of = por_oficina.head(15).sort_values("Quantidade", ascending=True)
+        if not grafico_of.empty:
+            fig = px.bar(
+                grafico_of,
+                x="Quantidade",
+                y="Oficina",
+                orientation="h",
+                title="Top 15 oficinas por consumo",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    with aba_motivos:
+        st.markdown("### Consumo por motivo de envio")
+        por_motivo = (
+            filtrada.assign(
+                motivo_envio=filtrada.get("motivo_envio", pd.Series("", index=filtrada.index))
+                .fillna("")
+                .replace("", "Não informado")
+            )
+            .groupby("motivo_envio", dropna=False)["quantidade"]
+            .sum()
+            .reset_index(name="Quantidade")
+            .rename(columns={"motivo_envio": "Motivo"})
+            .sort_values("Quantidade", ascending=False)
+        )
+        st.dataframe(por_motivo, use_container_width=True, hide_index=True)
+
+    with aba_detalhes:
+        st.markdown("### Registros de consumo OFS")
+        detalhes = filtrada.copy()
+        detalhes["Data"] = detalhes["data_execucao"].dt.strftime("%d/%m/%Y")
+        detalhes = detalhes.rename(
+            columns={
+                "os": "OS",
+                "oficina": "Oficina",
+                "codigo_item": "Código",
+                "nome_item": "Equipamento",
+                "quantidade": "Quantidade",
+                "motivo_envio": "Motivo de envio",
+                "cliente": "Cliente",
+            }
+        )
+        colunas = [
+            "Data", "OS", "Oficina", "Código", "Equipamento",
+            "Quantidade", "Motivo de envio", "Cliente",
+        ]
+        colunas = [c for c in colunas if c in detalhes.columns]
+        st.dataframe(
+            detalhes[colunas].sort_values("Data", ascending=False),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 # =========================================================
