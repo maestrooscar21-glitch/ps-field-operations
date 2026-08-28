@@ -1,5 +1,6 @@
 import html
 import io
+import hashlib
 import re
 import unicodedata
 import uuid
@@ -182,6 +183,258 @@ def inserir_em_lotes(
         lote = registros[inicio : inicio + tamanho_lote]
         cliente.table(tabela).insert(lote).execute()
 
+
+
+# =========================================================
+# PRIVACIDADE / MINIMIZAÇÃO DE DADOS
+# =========================================================
+
+# Campos pessoais que não são necessários para Planejamento, Resultado,
+# Pré-agenda ou Estoque não devem ser persistidos dentro do JSON bruto.
+# A lista é deliberadamente conservadora e NÃO remove Recurso/Técnico
+# das bases operacionais, pois esses campos ainda sustentam funcionalidades
+# do painel (pré-agenda e revisão MD). No módulo de estoque, Técnico não é
+# armazenado em nenhum campo.
+CAMPOS_PESSOAIS_BLOQUEADOS = (
+    "CPF",
+    "RG",
+    "CNH",
+    "TELEFONE",
+    "CELULAR",
+    "WHATSAPP",
+    "E-MAIL",
+    "EMAIL",
+)
+
+
+def coluna_pessoal_bloqueada(nome_coluna: str) -> bool:
+    nome = normalizar_texto(nome_coluna)
+    return any(termo in nome for termo in CAMPOS_PESSOAIS_BLOQUEADOS)
+
+
+def dados_sanitizados_linha(
+    linha: pd.Series,
+    excluir_adicionais: set[str] | None = None,
+) -> dict:
+    """Gera o JSON persistido removendo identificadores pessoais desnecessários."""
+    excluir = {
+        "Chave Ticket",
+        "Chave Placa",
+        "Chave OS",
+        "Chave Atendimento",
+    }
+    excluir.update(excluir_adicionais or set())
+
+    return {
+        str(coluna): texto_limpo(valor)
+        for coluna, valor in linha.items()
+        if str(coluna) not in excluir
+        and not coluna_pessoal_bloqueada(str(coluna))
+    }
+
+
+def colunas_pessoais_detectadas(df: pd.DataFrame) -> list[str]:
+    if df is None or df.empty:
+        return []
+    return [
+        str(coluna)
+        for coluna in df.columns
+        if coluna_pessoal_bloqueada(str(coluna))
+    ]
+
+
+# =========================================================
+# ESTOQUE — CONSUMO OFS / CATÁLOGO
+# =========================================================
+
+def ler_csv_equipamentos_ofs(arquivo) -> pd.DataFrame:
+    """Lê o relatório Equipamentos Trocados do OFS sem persistir dados de técnico."""
+    conteudo = arquivo.getvalue()
+    ultimo_erro = None
+    for encoding in ["utf-8-sig", "utf-8", "latin-1"]:
+        for separador in [",", ";"]:
+            try:
+                df = pd.read_csv(
+                    io.BytesIO(conteudo), encoding=encoding, sep=separador,
+                    dtype=str, low_memory=False,
+                )
+                df = padronizar_colunas(df)
+                if len(df.columns) <= 1:
+                    continue
+                obrigatorias = [
+                    "OS", "Qde", "Cód. Equip.", "Nome Equip.", "Execução",
+                    "Oficina", "Garantia", "Sinistro", "Motivo Envio", "Cliente",
+                ]
+                faltantes = [c for c in obrigatorias if c not in df.columns]
+                if faltantes:
+                    continue
+                return limpar_colunas_texto(df, [c for c in df.columns if c != "Qde"])
+            except Exception as erro:
+                ultimo_erro = erro
+    raise ValueError(
+        "Arquivo não reconhecido como 'Equipamentos Trocados — OFS'. "
+        f"Último erro: {ultimo_erro}"
+    )
+
+
+def _numero_estoque(valor) -> float:
+    texto = texto_limpo(valor).replace(".", "").replace(",", ".")
+    try:
+        return float(texto)
+    except Exception:
+        return 0.0
+
+
+def _hash_sha256_bytes(conteudo: bytes) -> str:
+    return hashlib.sha256(conteudo).hexdigest()
+
+
+def _chave_consumo_ofs(linha: pd.Series) -> str:
+    # Hash determinístico da linha operacional. O campo Técnico é deliberadamente excluído.
+    campos = [
+        texto_limpo(linha.get("OS", "")),
+        texto_limpo(linha.get("Cód. Equip.", "")),
+        texto_limpo(linha.get("Nome Equip.", "")),
+        texto_limpo(linha.get("Execução", "")),
+        texto_limpo(linha.get("Oficina", "")),
+        texto_limpo(linha.get("Qde", "")),
+        texto_limpo(linha.get("Garantia", "")),
+        texto_limpo(linha.get("Sinistro", "")),
+        texto_limpo(linha.get("Motivo Envio", "")),
+        texto_limpo(linha.get("Cliente", "")),
+    ]
+    return hashlib.sha256("||".join(campos).encode("utf-8")).hexdigest()
+
+
+def preparar_consumos_ofs(df: pd.DataFrame, importacao_id: int | None = None) -> list[dict]:
+    registros = []
+    for _, linha in df.iterrows():
+        quantidade = _numero_estoque(linha.get("Qde", ""))
+        codigo = texto_limpo(linha.get("Cód. Equip.", ""))
+        data_execucao = pd.to_datetime(linha.get("Execução", ""), dayfirst=True, errors="coerce")
+        if not codigo or quantidade <= 0 or pd.isna(data_execucao):
+            continue
+        dados_originais = {
+            "OS": texto_limpo(linha.get("OS", "")),
+            "Qde": texto_limpo(linha.get("Qde", "")),
+            "Cód. Equip.": codigo,
+            "Nome Equip.": texto_limpo(linha.get("Nome Equip.", "")),
+            "Execução": texto_limpo(linha.get("Execução", "")),
+            "Oficina": texto_limpo(linha.get("Oficina", "")),
+            "Garantia": texto_limpo(linha.get("Garantia", "")),
+            "Sinistro": texto_limpo(linha.get("Sinistro", "")),
+            "Motivo Envio": texto_limpo(linha.get("Motivo Envio", "")),
+            "Cliente": texto_limpo(linha.get("Cliente", "")),
+        }
+        registros.append({
+            "os": texto_limpo(linha.get("OS", "")),
+            "data_execucao": data_execucao.date().isoformat(),
+            "codigo_item": codigo,
+            "nome_item": texto_limpo(linha.get("Nome Equip.", "")),
+            "quantidade": quantidade,
+            "oficina": texto_limpo(linha.get("Oficina", "")),
+            "garantia": texto_limpo(linha.get("Garantia", "")),
+            "sinistro": texto_limpo(linha.get("Sinistro", "")),
+            "motivo_envio": texto_limpo(linha.get("Motivo Envio", "")),
+            "cliente": texto_limpo(linha.get("Cliente", "")),
+            "chave_consumo": _chave_consumo_ofs(linha),
+            "importacao_id": importacao_id,
+            "dados_originais": dados_originais,
+        })
+    return registros
+
+
+def salvar_consumos_ofs(arquivo, df: pd.DataFrame) -> dict:
+    cliente = exigir_supabase()
+    conteudo = arquivo.getvalue()
+    hash_arquivo = _hash_sha256_bytes(conteudo)
+
+    existente = (
+        cliente.table("estoque_importacoes")
+        .select("id,status")
+        .eq("hash_arquivo", hash_arquivo)
+        .limit(1).execute().data or []
+    )
+    if existente:
+        return {"duplicado": True, "importados": 0, "ignorados": len(df), "catalogo": 0}
+
+    datas = pd.to_datetime(df.get("Execução", pd.Series(dtype=str)), dayfirst=True, errors="coerce")
+    data_ref = datas.max().date().isoformat() if datas.notna().any() else None
+    cabecalho = {
+        "fonte": "OFS",
+        "nome_arquivo": arquivo.name,
+        "data_referencia": data_ref,
+        "quantidade_linhas": int(len(df)),
+        "quantidade_importada": 0,
+        "quantidade_ignorada": 0,
+        "hash_arquivo": hash_arquivo,
+        "status": "PROCESSANDO",
+        "observacoes": "Equipamentos Trocados — OFS. Técnico não armazenado.",
+    }
+    resposta = cliente.table("estoque_importacoes").insert(cabecalho).execute()
+    importacao_id = int(resposta.data[0]["id"])
+
+    try:
+        # Catálogo: código + nomenclatura; demais atributos serão enriquecidos depois.
+        catalogo = (
+            df[["Cód. Equip.", "Nome Equip."]].copy()
+            .rename(columns={"Cód. Equip.": "codigo_item", "Nome Equip.": "nome_item"})
+        )
+        catalogo["codigo_item"] = catalogo["codigo_item"].apply(texto_limpo)
+        catalogo["nome_item"] = catalogo["nome_item"].apply(texto_limpo)
+        catalogo = catalogo[catalogo["codigo_item"] != ""].drop_duplicates("codigo_item", keep="last")
+        registros_catalogo = catalogo.to_dict("records")
+        for inicio in range(0, len(registros_catalogo), 300):
+            cliente.table("estoque_catalogo_itens").upsert(
+                registros_catalogo[inicio:inicio+300], on_conflict="codigo_item"
+            ).execute()
+
+        registros = preparar_consumos_ofs(df, importacao_id)
+        chaves = [r["chave_consumo"] for r in registros]
+        existentes = set()
+        for inicio in range(0, len(chaves), 200):
+            lote = chaves[inicio:inicio+200]
+            if lote:
+                dados = cliente.table("estoque_consumos_ofs").select("chave_consumo").in_("chave_consumo", lote).execute().data or []
+                existentes.update(texto_limpo(x.get("chave_consumo")) for x in dados)
+        novos = [r for r in registros if r["chave_consumo"] not in existentes]
+        inserir_em_lotes("estoque_consumos_ofs", novos)
+        ignorados = len(df) - len(novos)
+        cliente.table("estoque_importacoes").update({
+            "quantidade_importada": len(novos),
+            "quantidade_ignorada": ignorados,
+            "status": "PROCESSADO",
+        }).eq("id", importacao_id).execute()
+        st.cache_data.clear()
+        return {"duplicado": False, "importados": len(novos), "ignorados": ignorados, "catalogo": len(registros_catalogo)}
+    except Exception as erro:
+        cliente.table("estoque_importacoes").update({
+            "status": "ERRO", "observacoes": f"Falha na importação: {erro}"
+        }).eq("id", importacao_id).execute()
+        raise
+
+
+@st.cache_data(ttl=CACHE_TTL_SEGUNDOS, show_spinner=False)
+def carregar_consumos_estoque() -> pd.DataFrame:
+    registros = buscar_todos("estoque_consumos_ofs", ordem="data_execucao", desc=True)
+    if not registros:
+        return pd.DataFrame()
+    df = pd.DataFrame(registros)
+    df["data_execucao"] = pd.to_datetime(df["data_execucao"], errors="coerce")
+    df["quantidade"] = pd.to_numeric(df["quantidade"], errors="coerce").fillna(0)
+    return df
+
+
+def classificar_curva_abc(consumo_item: pd.DataFrame) -> pd.DataFrame:
+    base = consumo_item.copy().sort_values("Quantidade", ascending=False).reset_index(drop=True)
+    total = float(base["Quantidade"].sum())
+    if total <= 0:
+        base["Curva ABC"] = "C"
+        return base
+    base["% acumulado"] = base["Quantidade"].cumsum() / total * 100
+    # Classificação inicial operacional: A até 80%, B até 95%, C restante.
+    base["Curva ABC"] = base["% acumulado"].apply(lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C"))
+    return base
 
 
 # =========================================================
@@ -1768,16 +2021,7 @@ def preparar_pre_agenda_para_banco(
             linha.get("Data", "")
         )
 
-        dados = {
-            str(coluna): texto_limpo(valor)
-            for coluna, valor in linha.items()
-            if coluna not in {
-                "Chave Ticket",
-                "Chave Placa",
-                "Chave OS",
-                "Chave Atendimento",
-            }
-        }
+        dados = dados_sanitizados_linha(linha)
 
         registros.append(
             {
@@ -2163,16 +2407,7 @@ def registro_atividade(
     nome_arquivo_primeira_aparicao: str | None = None,
     planejamento_base: bool | None = None,
 ) -> dict:
-    dados = {
-        str(coluna): texto_limpo(valor)
-        for coluna, valor in linha.items()
-        if coluna not in {
-            "Chave Ticket",
-            "Chave Placa",
-            "Chave OS",
-            "Chave Atendimento",
-        }
-    }
+    dados = dados_sanitizados_linha(linha)
 
     registro = {
         "data_operacional": data_operacional,
@@ -5468,6 +5703,7 @@ with st.sidebar:
             "📊 Dashboard",
             "📞 Follow",
             "📥 Dados",
+            "📦 Estoque",
             "⚙️ Configurações",
         ],
         key="nav_area_principal",
@@ -5509,6 +5745,9 @@ with st.sidebar:
             "Follow × OFS": "🔄 Follow × Resultado OFS",
         }[subarea]
 
+    elif area == "📦 Estoque":
+        pagina = "📦 Estoque & Equipamentos"
+
     elif area == "📥 Dados":
         subarea = st.radio(
             "Dados",
@@ -5529,7 +5768,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.6.7 — Fila operacional de revisão MD com conclusão automática"
+        "Versão 2.7.1 — Sanitização + Estoque OFS + Curva ABC"
     )
 
 
@@ -5545,13 +5784,19 @@ if pagina == "📥 Importações":
         "Escolha a data operacional. Se já existir uma base do mesmo "
         "tipo e data, ela será substituída."
     )
+    st.caption(
+        "🔐 Minimização ativa: CPF, RG, CNH, telefone, celular, WhatsApp e e-mail "
+        "são descartados do conteúdo bruto persistido nas importações operacionais. "
+        "Campos necessários às regras do painel, como Recurso, continuam preservados."
+    )
 
-    aba_oficinas, aba_planejado, aba_resultado, aba_pre_agenda = st.tabs(
+    aba_oficinas, aba_planejado, aba_resultado, aba_pre_agenda, aba_estoque_ofs = st.tabs(
         [
             "🏢 Oficinas",
             "📅 Planejado",
             "📈 Resultado",
             "🛰️ Pré-agenda / Aceite",
+            "📦 Equipamentos Trocados — OFS",
         ]
     )
 
@@ -5783,6 +6028,39 @@ if pagina == "📥 Importações":
 
             except Exception as erro:
                 st.error(f"Erro na pré-agenda: {erro}")
+
+
+    with aba_estoque_ofs:
+        st.markdown("### Equipamentos Trocados — OFS")
+        st.caption(
+            "Fonte de consumo realizado. O importador grava oficina, OS, item, quantidade, "
+            "data e motivo. Nome de técnico, CPF e celular não são armazenados no módulo de estoque."
+        )
+        arquivo_estoque = st.file_uploader(
+            "CSV de Equipamentos Trocados do OFS", type=["csv"], key="estoque_ofs_upload"
+        )
+        if arquivo_estoque is not None:
+            try:
+                df_est = ler_csv_equipamentos_ofs(arquivo_estoque)
+                preview = preparar_consumos_ofs(df_est)
+                qtd_total = sum(float(r["quantidade"]) for r in preview)
+                st.write(f"Linhas lidas: **{len(df_est)}** · Quantidade total: **{qtd_total:,.0f}** · Itens: **{df_est['Cód. Equip.'].nunique()}**")
+                st.dataframe(
+                    df_est[["OS", "Execução", "Oficina", "Cód. Equip.", "Nome Equip.", "Qde", "Motivo Envio"]].head(100),
+                    use_container_width=True, hide_index=True,
+                )
+                if st.button("💾 Importar consumo OFS no estoque", type="primary", key="salvar_estoque_ofs"):
+                    resumo = salvar_consumos_ofs(arquivo_estoque, df_est)
+                    if resumo["duplicado"]:
+                        st.warning("Este arquivo já foi importado anteriormente. Nenhum dado foi duplicado.")
+                    else:
+                        st.success(
+                            f"Importação concluída: {resumo['importados']} registro(s) novo(s), "
+                            f"{resumo['ignorados']} ignorado(s) e {resumo['catalogo']} item(ns) no catálogo."
+                        )
+                    st.rerun()
+            except Exception as erro:
+                st.error(f"Erro no consumo OFS: {erro}")
 
 
 # =========================================================
