@@ -308,12 +308,26 @@ def _chave_consumo_ofs(linha: pd.Series) -> str:
 
 def preparar_consumos_ofs(df: pd.DataFrame, importacao_id: int | None = None) -> list[dict]:
     registros = []
+    # O relatório OFS pode conter linhas operacionalmente idênticas e todas elas
+    # representam consumo real. A chave antiga colapsava essas ocorrências.
+    # O contador abaixo preserva a 1ª, 2ª, 3ª... ocorrência da mesma linha e,
+    # ao mesmo tempo, mantém a chave determinística para impedir reimportação.
+    ocorrencias_por_chave: dict[str, int] = {}
+
     for _, linha in df.iterrows():
         quantidade = _numero_estoque(linha.get("Qde", ""))
         codigo = texto_limpo(linha.get("Cód. Equip.", ""))
         data_execucao = pd.to_datetime(linha.get("Execução", ""), dayfirst=True, errors="coerce")
         if not codigo or quantidade <= 0 or pd.isna(data_execucao):
             continue
+
+        chave_base = _chave_consumo_ofs(linha)
+        ocorrencia = ocorrencias_por_chave.get(chave_base, 0) + 1
+        ocorrencias_por_chave[chave_base] = ocorrencia
+        chave_consumo = hashlib.sha256(
+            f"{chave_base}||ocorrencia:{ocorrencia}".encode("utf-8")
+        ).hexdigest()
+
         dados_originais = {
             "OS": texto_limpo(linha.get("OS", "")),
             "Qde": texto_limpo(linha.get("Qde", "")),
@@ -337,7 +351,7 @@ def preparar_consumos_ofs(df: pd.DataFrame, importacao_id: int | None = None) ->
             "sinistro": texto_limpo(linha.get("Sinistro", "")),
             "motivo_envio": texto_limpo(linha.get("Motivo Envio", "")),
             "cliente": texto_limpo(linha.get("Cliente", "")),
-            "chave_consumo": _chave_consumo_ofs(linha),
+            "chave_consumo": chave_consumo,
             "importacao_id": importacao_id,
             "dados_originais": dados_originais,
         })
@@ -5768,7 +5782,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.7.2 — Correção da página Estoque + Sanitização"
+        "Versão 2.7.3 — Correção da página Estoque + Sanitização"
     )
 
 
