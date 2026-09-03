@@ -302,10 +302,7 @@ def salvar_revisao_md(
         on_conflict="data_operacional,chave_atendimento",
     ).execute()
 
-    # Invalida somente os caches afetados pela revisão MD.
-    # Evita apagar todo o cache do aplicativo a cada tratativa.
-    carregar_revisoes_md.clear()
-    carregar_consolidado.clear()
+    st.cache_data.clear()
 
 
 def excluir_revisao_md(
@@ -324,9 +321,7 @@ def excluir_revisao_md(
         chave_atendimento,
     ).execute()
 
-    # Invalida somente os caches afetados pela revisão MD.
-    carregar_revisoes_md.clear()
-    carregar_consolidado.clear()
+    st.cache_data.clear()
 
 
 def aplicar_revisoes_md(
@@ -4197,432 +4192,6 @@ def date_input_persistente(
     return valor
 
 
-
-
-# =========================================================
-# FRAGMENTO DE TRATATIVA MD — PERFORMANCE
-# =========================================================
-# Widgets dentro deste fragmento não reexecutam o Dashboard de
-# Improdutividade inteiro quando o usuário apenas troca a OS selecionada.
-_fragment = getattr(st, "fragment", lambda func: func)
-
-@_fragment
-def render_tratativa_md(analise: pd.DataFrame, base: pd.DataFrame) -> None:
-    # =====================================================
-    # TRATATIVA GERENCIAL EXCLUSIVA DA MD
-    # =====================================================
-    st.divider()
-    st.markdown("### ✍️ Tratativa gerencial da MD")
-    st.caption(
-        "A fila abaixo é uma fila de trabalho: depois de salvar a tratativa, "
-        "a OS sai da lista pendente e permanece registrada no banco/histórico. "
-        "O apontamento original do OFS, os arquivos operacionais, a MCI e as "
-        "contagens históricas continuam intactos."
-    )
-
-    analise_revisao = analise.copy()
-
-    mascara_revisada = analise_revisao.get(
-        "Revisao_MD",
-        pd.Series(False, index=analise_revisao.index),
-    ).fillna(False).astype(bool)
-
-    total_carteira = len(analise_revisao)
-    revisadas = int(mascara_revisada.sum())
-    pendentes = max(total_carteira - revisadas, 0)
-
-    no_show_tecnico = int(
-        (
-            analise_revisao.get(
-                "Classificacao_gerencial_MD",
-                pd.Series("", index=analise_revisao.index),
-            ) == "No-show técnico"
-        ).sum()
-    )
-
-    # Estado da aba/fila
-    if "md_fila_status" not in st.session_state:
-        st.session_state["md_fila_status"] = "Pendentes"
-
-    b1, b2, b3, b4 = st.columns(4)
-
-    with b1:
-        if st.button(
-            f"🟠 Pendentes ({pendentes})",
-            use_container_width=True,
-            type=(
-                "primary"
-                if st.session_state["md_fila_status"] == "Pendentes"
-                else "secondary"
-            ),
-            key="btn_md_pendentes",
-        ):
-            st.session_state["md_fila_status"] = "Pendentes"
-            st.rerun()
-
-    with b2:
-        if st.button(
-            f"✅ Revisadas ({revisadas})",
-            use_container_width=True,
-            type=(
-                "primary"
-                if st.session_state["md_fila_status"] == "Revisadas"
-                else "secondary"
-            ),
-            key="btn_md_revisadas",
-        ):
-            st.session_state["md_fila_status"] = "Revisadas"
-            st.rerun()
-
-    with b3:
-        if st.button(
-            f"📋 Todas ({total_carteira})",
-            use_container_width=True,
-            type=(
-                "primary"
-                if st.session_state["md_fila_status"] == "Todas"
-                else "secondary"
-            ),
-            key="btn_md_todas",
-        ):
-            st.session_state["md_fila_status"] = "Todas"
-            st.rerun()
-
-    with b4:
-        st.metric("No-show técnico", no_show_tecnico)
-
-    st.caption(
-        "Os filtros de Consultor, Oficina e Técnico/Recurso acima também "
-        "controlam esta fila. Assim cada consultor trata apenas a sua carteira."
-    )
-
-    fila_status = st.session_state["md_fila_status"]
-
-    # Regra principal:
-    # - Pendentes = fila de trabalho.
-    # - Revisadas = histórico das tratativas.
-    # - Todas = visão administrativa, não fila operacional.
-    if fila_status == "Pendentes":
-        analise_revisao = analise_revisao[
-            ~mascara_revisada
-        ].copy()
-    elif fila_status == "Revisadas":
-        analise_revisao = analise_revisao[
-            mascara_revisada
-        ].copy()
-
-    analise_revisao["OS_exibir"] = analise_revisao[
-        "OS_resultado"
-    ].apply(lambda v: texto_limpo(v) or "Sem OS")
-
-    analise_revisao["Rotulo_revisao"] = analise_revisao.apply(
-        lambda linha: (
-            f"{texto_limpo(linha.get('Data Operacional', ''))} | "
-            f"OS {texto_limpo(linha.get('OS_exibir', ''))} | "
-            f"{texto_limpo(linha.get('Tecnico_recurso', ''))} | "
-            f"{texto_limpo(linha.get('Oficina', ''))}"
-        ),
-        axis=1,
-    )
-
-    opcoes = analise_revisao["Rotulo_revisao"].tolist()
-
-    if not opcoes:
-        if fila_status == "Pendentes":
-            st.success("Nenhuma OS pendente de revisão neste filtro.")
-        elif fila_status == "Revisadas":
-            st.info("Nenhuma OS revisada neste filtro.")
-        else:
-            st.info("Nenhuma OS encontrada neste filtro.")
-    else:
-        selecionada = st.selectbox(
-            (
-                "Selecione a OS para tratar"
-                if fila_status == "Pendentes"
-                else "Selecione a OS para consultar"
-            ),
-            opcoes,
-            key=f"md_revisao_os_{fila_status}",
-        )
-
-        linha = analise_revisao[
-            analise_revisao["Rotulo_revisao"] == selecionada
-        ].iloc[0]
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown(
-                "**Motivo OFS:**  \n"
-                + (
-                    texto_limpo(linha.get("Razao_improdutiva", ""))
-                    or "Não informado"
-                )
-            )
-            st.markdown(
-                "**Observação do técnico:**  \n"
-                + (
-                    texto_limpo(
-                        linha.get("Observacao_tecnico_improdutiva", "")
-                    )
-                    or "Sem observação"
-                )
-            )
-            st.markdown(
-                "**Técnico / recurso:**  \n"
-                + (
-                    texto_limpo(linha.get("Tecnico_recurso", ""))
-                    or "Não informado"
-                )
-            )
-
-        with c2:
-            st.markdown(
-                "**Consultor:**  \n"
-                + (
-                    texto_limpo(linha.get("Consultor", ""))
-                    or "Não definido"
-                )
-            )
-            st.markdown(
-                "**Oficina:**  \n"
-                + (
-                    texto_limpo(linha.get("Oficina", ""))
-                    or "Não definida"
-                )
-            )
-            st.markdown(
-                "**Classificação MD atual:**  \n"
-                + (
-                    texto_limpo(
-                        linha.get("Classificacao_gerencial_MD", "")
-                    )
-                    or "Improdutiva"
-                )
-            )
-
-        classificacoes = [
-            "Improdutiva",
-            "No-show técnico",
-            "No-show cliente",
-            "Cancelada",
-        ]
-        atual = (
-            texto_limpo(
-                linha.get("Classificacao_gerencial_MD", "")
-            )
-            or "Improdutiva"
-        )
-        idx = (
-            classificacoes.index(atual)
-            if atual in classificacoes
-            else 0
-        )
-
-        classificacao_md = st.selectbox(
-            "Classificação gerencial para a MD",
-            classificacoes,
-            index=idx,
-            disabled=(fila_status == "Revisadas"),
-            help=(
-                "No-show técnico, No-show cliente e Cancelada retiram a OS "
-                "do universo da MD, mas não alteram o registro original."
-            ),
-            key=f"md_revisao_classificacao_{fila_status}",
-        )
-
-        motivo_original = texto_limpo(
-            linha.get("Razao_improdutiva", "")
-        )
-        motivo_md = (
-            texto_limpo(
-                linha.get("Razao_improdutiva_md", "")
-            )
-            or motivo_original
-        )
-
-        motivos = [
-            "Problemas técnicos com sistemas",
-            "Problemas técnicos com veículos",
-            "Veículo indisponível",
-            "Equipamento / material",
-            "Portaria / acesso",
-            "Cliente / agendamento",
-            "Técnico / capacidade",
-            "OS / cadastro / direcionamento",
-            "Sinistro",
-        ]
-
-        for valor in base.get(
-            "Razao_improdutiva",
-            pd.Series(dtype=str),
-        ):
-            valor = texto_limpo(valor)
-            if valor and valor not in motivos:
-                motivos.append(valor)
-
-        if motivo_md and motivo_md not in motivos:
-            motivos.insert(0, motivo_md)
-
-        novo_motivo_md = motivo_md
-
-        if classificacao_md == "Improdutiva":
-            idx_motivo = (
-                motivos.index(motivo_md)
-                if motivo_md in motivos
-                else 0
-            )
-            novo_motivo_md = st.selectbox(
-                "Motivo validado para a MD",
-                motivos,
-                index=idx_motivo,
-                disabled=(fila_status == "Revisadas"),
-                key=f"md_revisao_motivo_{fila_status}",
-            )
-        else:
-            st.info(
-                f"Para a MD, esta OS está sendo tratada como "
-                f"**{classificacao_md}** e não compõe a improdutividade "
-                "do indicador."
-            )
-
-        justificativa = st.text_area(
-            "Justificativa da tratativa",
-            value=texto_limpo(
-                linha.get("Justificativa_revisao_MD", "")
-            ),
-            disabled=(fila_status == "Revisadas"),
-            key=f"md_revisao_justificativa_{fila_status}",
-        )
-
-        revisor = st.text_input(
-            "Responsável pela revisão",
-            value=texto_limpo(
-                linha.get("Revisor_MD", "")
-            ),
-            disabled=(fila_status == "Revisadas"),
-            key=f"md_revisao_responsavel_{fila_status}",
-        )
-
-        if fila_status != "Revisadas":
-            s1, s2 = st.columns(2)
-
-            with s1:
-                if st.button(
-                    "💾 Salvar e concluir revisão",
-                    type="primary",
-                    use_container_width=True,
-                    key=f"salvar_revisao_md_{fila_status}",
-                ):
-                    if not texto_limpo(justificativa):
-                        st.error(
-                            "Informe a justificativa da tratativa."
-                        )
-                    else:
-                        salvar_revisao_md(
-                            texto_limpo(
-                                linha.get("Data Operacional", "")
-                            ),
-                            texto_limpo(
-                                linha.get("Chave Atendimento", "")
-                            ),
-                            motivo_original,
-                            classificacao_md,
-                            novo_motivo_md,
-                            justificativa,
-                            revisor,
-                        )
-
-                        # Após concluir, volta para a fila de pendentes.
-                        # A OS recém-revisada desaparece imediatamente dessa fila.
-                        st.session_state["md_fila_status"] = "Pendentes"
-                        st.success(
-                            "Revisão concluída. A OS saiu da fila pendente "
-                            "e ficou registrada no histórico."
-                        )
-                        st.rerun()
-
-            with s2:
-                if bool(linha.get("Revisao_MD", False)):
-                    if st.button(
-                        "↩️ Remover tratativa e reabrir OS",
-                        use_container_width=True,
-                        key=f"remover_revisao_md_{fila_status}",
-                    ):
-                        excluir_revisao_md(
-                            texto_limpo(
-                                linha.get("Data Operacional", "")
-                            ),
-                            texto_limpo(
-                                linha.get("Chave Atendimento", "")
-                            ),
-                        )
-                        st.session_state["md_fila_status"] = "Pendentes"
-                        st.success(
-                            "Tratativa removida. A OS voltou para a fila pendente."
-                        )
-                        st.rerun()
-        else:
-            if st.button(
-                "↩️ Reabrir esta OS para nova revisão",
-                use_container_width=True,
-                key="reabrir_revisao_md",
-            ):
-                excluir_revisao_md(
-                    texto_limpo(
-                        linha.get("Data Operacional", "")
-                    ),
-                    texto_limpo(
-                        linha.get("Chave Atendimento", "")
-                    ),
-                )
-                st.session_state["md_fila_status"] = "Pendentes"
-                st.success(
-                    "OS reaberta e devolvida à fila pendente."
-                )
-                st.rerun()
-
-    revisoes_ativas = analise[
-        analise.get(
-            "Revisao_MD",
-            pd.Series(False, index=analise.index),
-        ).fillna(False).astype(bool)
-    ].copy()
-
-    if not revisoes_ativas.empty:
-        st.markdown("#### Histórico de tratativas no filtro atual")
-        cols = [
-            c
-            for c in [
-                "Data Operacional",
-                "OS_resultado",
-                "Consultor",
-                "Oficina",
-                "Tecnico_recurso",
-                "Razao_improdutiva",
-                "Classificacao_gerencial_MD",
-                "Razao_improdutiva_md",
-                "Justificativa_revisao_MD",
-                "Revisor_MD",
-            ]
-            if c in revisoes_ativas.columns
-        ]
-        st.dataframe(
-            revisoes_ativas[cols].rename(
-                columns={
-                    "OS_resultado": "OS",
-                    "Tecnico_recurso": "Técnico / recurso",
-                    "Razao_improdutiva": "Motivo OFS",
-                    "Classificacao_gerencial_MD": "Classificação MD",
-                    "Razao_improdutiva_md": "Motivo validado MD",
-                    "Justificativa_revisao_MD": "Justificativa",
-                    "Revisor_MD": "Revisor",
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-
 # =========================================================
 # CABEÇALHO E MENU
 # =========================================================
@@ -4688,7 +4257,7 @@ with st.sidebar:
         pagina = "🏢 Cadastro de Oficinas"
 
     st.divider()
-    st.caption("Versão 2.8.1 — Performance da Tratativa MD")
+    st.caption("Versão 2.8.0 — Gestão separada de Estoque e Follow")
 
 
 # =========================================================
@@ -7160,9 +6729,485 @@ elif pagina == "📉 Dashboard de Improdutividade":
         use_container_width=True,
     )
 
-    # A tratativa roda como fragmento independente. Ao trocar apenas a OS,
-    # Streamlit reexecuta somente este bloco, sem reconstruir rankings/gráficos.
-    render_tratativa_md(analise, base)
+    # =====================================================
+    # TRATATIVA GERENCIAL EXCLUSIVA DA MD
+    # =====================================================
+    st.divider()
+    st.markdown("### ✍️ Tratativa gerencial da MD")
+    st.caption(
+        "A fila abaixo é uma fila de trabalho: depois de salvar a tratativa, "
+        "a OS sai da lista pendente e permanece registrada no banco/histórico. "
+        "O apontamento original do OFS, os arquivos operacionais, a MCI e as "
+        "contagens históricas continuam intactos."
+    )
+
+    # A fila gerencial e uma rotina operacional D-1. Ela nao pode herdar
+    # o periodo nem os filtros de qualidade/conformidade do dashboard,
+    # pois isso fazia OS validas de ontem desaparecerem da tratativa.
+    data_ontem = (
+        datetime.now(FUSO_BRASIL) - pd.Timedelta(days=1)
+    ).date()
+
+    data_ontem_iso = data_ontem.isoformat()
+    planejado_ontem = carregar_base("planejado", data_ontem_iso)
+    resultado_ontem = carregar_base("resultado", data_ontem_iso)
+
+    if resultado_ontem.empty:
+        # Preserva o esquema esperado pela interface mesmo sem resultado D-1.
+        carteira_tratativa = improdutivas.iloc[0:0].copy()
+    else:
+        # A tratativa parte do resultado D-1. O planejado e usado para
+        # distinguir agendada de extra, mas a ausencia dele nao pode ocultar
+        # improdutivas que de fato constam no resultado de ontem.
+        carteira_tratativa = conciliar_bases(
+            planejado_ontem,
+            resultado_ontem,
+        )
+        carteira_tratativa.insert(
+            0,
+            "Data Operacional",
+            data_ontem_iso,
+        )
+        carteira_tratativa = aplicar_revisoes_md(
+            carteira_tratativa
+        )
+
+        if not cadastro.empty:
+            carteira_tratativa = enriquecer_com_cadastro(
+                carteira_tratativa,
+                cadastro,
+            )
+
+        carteira_tratativa = carteira_tratativa[
+            carteira_tratativa["Classificação"].isin(
+                ["Improdutiva agendada", "Improdutiva extra"]
+            )
+        ].copy()
+
+    # Os filtros de responsabilidade continuam valendo, mas os filtros
+    # analiticos do dashboard nao interferem mais na fila D-1.
+    if consultor_filtro:
+        carteira_tratativa = carteira_tratativa[
+            carteira_tratativa["Consultor"].isin(consultor_filtro)
+        ].copy()
+
+    if oficina_filtro:
+        carteira_tratativa = carteira_tratativa[
+            carteira_tratativa["Oficina"].isin(oficina_filtro)
+        ].copy()
+
+    if tecnico_filtro:
+        carteira_tratativa = carteira_tratativa[
+            carteira_tratativa["Tecnico_recurso"].isin(tecnico_filtro)
+        ].copy()
+
+    analise_revisao = carteira_tratativa.copy()
+
+    st.info(
+        "Fila operacional de "
+        f"{data_ontem.strftime('%d/%m/%Y')} (D-1): "
+        f"{len(carteira_tratativa)} OS improdutiva(s)."
+    )
+
+    mascara_revisada = analise_revisao.get(
+        "Revisao_MD",
+        pd.Series(False, index=analise_revisao.index),
+    ).fillna(False).astype(bool)
+
+    total_carteira = len(analise_revisao)
+    revisadas = int(mascara_revisada.sum())
+    pendentes = max(total_carteira - revisadas, 0)
+
+    no_show_tecnico = int(
+        (
+            analise_revisao.get(
+                "Classificacao_gerencial_MD",
+                pd.Series("", index=analise_revisao.index),
+            ) == "No-show técnico"
+        ).sum()
+    )
+
+    # Estado da aba/fila
+    if "md_fila_status" not in st.session_state:
+        st.session_state["md_fila_status"] = "Pendentes"
+
+    b1, b2, b3, b4 = st.columns(4)
+
+    with b1:
+        if st.button(
+            f"🟠 Pendentes ({pendentes})",
+            use_container_width=True,
+            type=(
+                "primary"
+                if st.session_state["md_fila_status"] == "Pendentes"
+                else "secondary"
+            ),
+            key="btn_md_pendentes",
+        ):
+            st.session_state["md_fila_status"] = "Pendentes"
+            st.rerun()
+
+    with b2:
+        if st.button(
+            f"✅ Revisadas ({revisadas})",
+            use_container_width=True,
+            type=(
+                "primary"
+                if st.session_state["md_fila_status"] == "Revisadas"
+                else "secondary"
+            ),
+            key="btn_md_revisadas",
+        ):
+            st.session_state["md_fila_status"] = "Revisadas"
+            st.rerun()
+
+    with b3:
+        if st.button(
+            f"📋 Todas ({total_carteira})",
+            use_container_width=True,
+            type=(
+                "primary"
+                if st.session_state["md_fila_status"] == "Todas"
+                else "secondary"
+            ),
+            key="btn_md_todas",
+        ):
+            st.session_state["md_fila_status"] = "Todas"
+            st.rerun()
+
+    with b4:
+        st.metric("No-show técnico", no_show_tecnico)
+
+    st.caption(
+        "Os filtros de Consultor, Oficina e Técnico/Recurso acima também "
+        "controlam esta fila. Assim cada consultor trata apenas a sua carteira."
+    )
+
+    fila_status = st.session_state["md_fila_status"]
+
+    # Regra principal:
+    # - Pendentes = fila de trabalho.
+    # - Revisadas = histórico das tratativas.
+    # - Todas = visão administrativa, não fila operacional.
+    if fila_status == "Pendentes":
+        analise_revisao = analise_revisao[
+            ~mascara_revisada
+        ].copy()
+    elif fila_status == "Revisadas":
+        analise_revisao = analise_revisao[
+            mascara_revisada
+        ].copy()
+
+    analise_revisao["OS_exibir"] = analise_revisao[
+        "OS_resultado"
+    ].apply(lambda v: texto_limpo(v) or "Sem OS")
+
+    analise_revisao["Rotulo_revisao"] = analise_revisao.apply(
+        lambda linha: (
+            f"{texto_limpo(linha.get('Data Operacional', ''))} | "
+            f"OS {texto_limpo(linha.get('OS_exibir', ''))} | "
+            f"{texto_limpo(linha.get('Tecnico_recurso', ''))} | "
+            f"{texto_limpo(linha.get('Oficina', ''))}"
+        ),
+        axis=1,
+    )
+
+    opcoes = analise_revisao["Rotulo_revisao"].tolist()
+
+    if not opcoes:
+        if fila_status == "Pendentes":
+            st.success("Nenhuma OS pendente de revisão neste filtro.")
+        elif fila_status == "Revisadas":
+            st.info("Nenhuma OS revisada neste filtro.")
+        else:
+            st.info("Nenhuma OS encontrada neste filtro.")
+    else:
+        selecionada = st.selectbox(
+            (
+                "Selecione a OS para tratar"
+                if fila_status == "Pendentes"
+                else "Selecione a OS para consultar"
+            ),
+            opcoes,
+            key=f"md_revisao_os_{fila_status}",
+        )
+
+        linha = analise_revisao[
+            analise_revisao["Rotulo_revisao"] == selecionada
+        ].iloc[0]
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(
+                "**Motivo OFS:**  \n"
+                + (
+                    texto_limpo(linha.get("Razao_improdutiva", ""))
+                    or "Não informado"
+                )
+            )
+            st.markdown(
+                "**Observação do técnico:**  \n"
+                + (
+                    texto_limpo(
+                        linha.get("Observacao_tecnico_improdutiva", "")
+                    )
+                    or "Sem observação"
+                )
+            )
+            st.markdown(
+                "**Técnico / recurso:**  \n"
+                + (
+                    texto_limpo(linha.get("Tecnico_recurso", ""))
+                    or "Não informado"
+                )
+            )
+
+        with c2:
+            st.markdown(
+                "**Consultor:**  \n"
+                + (
+                    texto_limpo(linha.get("Consultor", ""))
+                    or "Não definido"
+                )
+            )
+            st.markdown(
+                "**Oficina:**  \n"
+                + (
+                    texto_limpo(linha.get("Oficina", ""))
+                    or "Não definida"
+                )
+            )
+            st.markdown(
+                "**Classificação MD atual:**  \n"
+                + (
+                    texto_limpo(
+                        linha.get("Classificacao_gerencial_MD", "")
+                    )
+                    or "Improdutiva"
+                )
+            )
+
+        classificacoes = [
+            "Improdutiva",
+            "No-show técnico",
+            "No-show cliente",
+            "Cancelada",
+        ]
+        atual = (
+            texto_limpo(
+                linha.get("Classificacao_gerencial_MD", "")
+            )
+            or "Improdutiva"
+        )
+        idx = (
+            classificacoes.index(atual)
+            if atual in classificacoes
+            else 0
+        )
+
+        classificacao_md = st.selectbox(
+            "Classificação gerencial para a MD",
+            classificacoes,
+            index=idx,
+            disabled=(fila_status == "Revisadas"),
+            help=(
+                "No-show técnico, No-show cliente e Cancelada retiram a OS "
+                "do universo da MD, mas não alteram o registro original."
+            ),
+            key=f"md_revisao_classificacao_{fila_status}",
+        )
+
+        motivo_original = texto_limpo(
+            linha.get("Razao_improdutiva", "")
+        )
+        motivo_md = (
+            texto_limpo(
+                linha.get("Razao_improdutiva_md", "")
+            )
+            or motivo_original
+        )
+
+        motivos = [
+            "Problemas técnicos com sistemas",
+            "Problemas técnicos com veículos",
+            "Veículo indisponível",
+            "Equipamento / material",
+            "Portaria / acesso",
+            "Cliente / agendamento",
+            "Técnico / capacidade",
+            "OS / cadastro / direcionamento",
+            "Sinistro",
+        ]
+
+        for valor in base.get(
+            "Razao_improdutiva",
+            pd.Series(dtype=str),
+        ):
+            valor = texto_limpo(valor)
+            if valor and valor not in motivos:
+                motivos.append(valor)
+
+        if motivo_md and motivo_md not in motivos:
+            motivos.insert(0, motivo_md)
+
+        novo_motivo_md = motivo_md
+
+        if classificacao_md == "Improdutiva":
+            idx_motivo = (
+                motivos.index(motivo_md)
+                if motivo_md in motivos
+                else 0
+            )
+            novo_motivo_md = st.selectbox(
+                "Motivo validado para a MD",
+                motivos,
+                index=idx_motivo,
+                disabled=(fila_status == "Revisadas"),
+                key=f"md_revisao_motivo_{fila_status}",
+            )
+        else:
+            st.info(
+                f"Para a MD, esta OS está sendo tratada como "
+                f"**{classificacao_md}** e não compõe a improdutividade "
+                "do indicador."
+            )
+
+        justificativa = st.text_area(
+            "Justificativa da tratativa",
+            value=texto_limpo(
+                linha.get("Justificativa_revisao_MD", "")
+            ),
+            disabled=(fila_status == "Revisadas"),
+            key=f"md_revisao_justificativa_{fila_status}",
+        )
+
+        revisor = st.text_input(
+            "Responsável pela revisão",
+            value=texto_limpo(
+                linha.get("Revisor_MD", "")
+            ),
+            disabled=(fila_status == "Revisadas"),
+            key=f"md_revisao_responsavel_{fila_status}",
+        )
+
+        if fila_status != "Revisadas":
+            s1, s2 = st.columns(2)
+
+            with s1:
+                if st.button(
+                    "💾 Salvar e concluir revisão",
+                    type="primary",
+                    use_container_width=True,
+                    key=f"salvar_revisao_md_{fila_status}",
+                ):
+                    if not texto_limpo(justificativa):
+                        st.error(
+                            "Informe a justificativa da tratativa."
+                        )
+                    else:
+                        salvar_revisao_md(
+                            texto_limpo(
+                                linha.get("Data Operacional", "")
+                            ),
+                            texto_limpo(
+                                linha.get("Chave Atendimento", "")
+                            ),
+                            motivo_original,
+                            classificacao_md,
+                            novo_motivo_md,
+                            justificativa,
+                            revisor,
+                        )
+
+                        # Após concluir, volta para a fila de pendentes.
+                        # A OS recém-revisada desaparece imediatamente dessa fila.
+                        st.session_state["md_fila_status"] = "Pendentes"
+                        st.success(
+                            "Revisão concluída. A OS saiu da fila pendente "
+                            "e ficou registrada no histórico."
+                        )
+                        st.rerun()
+
+            with s2:
+                if bool(linha.get("Revisao_MD", False)):
+                    if st.button(
+                        "↩️ Remover tratativa e reabrir OS",
+                        use_container_width=True,
+                        key=f"remover_revisao_md_{fila_status}",
+                    ):
+                        excluir_revisao_md(
+                            texto_limpo(
+                                linha.get("Data Operacional", "")
+                            ),
+                            texto_limpo(
+                                linha.get("Chave Atendimento", "")
+                            ),
+                        )
+                        st.session_state["md_fila_status"] = "Pendentes"
+                        st.success(
+                            "Tratativa removida. A OS voltou para a fila pendente."
+                        )
+                        st.rerun()
+        else:
+            if st.button(
+                "↩️ Reabrir esta OS para nova revisão",
+                use_container_width=True,
+                key="reabrir_revisao_md",
+            ):
+                excluir_revisao_md(
+                    texto_limpo(
+                        linha.get("Data Operacional", "")
+                    ),
+                    texto_limpo(
+                        linha.get("Chave Atendimento", "")
+                    ),
+                )
+                st.session_state["md_fila_status"] = "Pendentes"
+                st.success(
+                    "OS reaberta e devolvida à fila pendente."
+                )
+                st.rerun()
+
+    revisoes_ativas = carteira_tratativa[
+        carteira_tratativa.get(
+            "Revisao_MD",
+            pd.Series(False, index=carteira_tratativa.index),
+        ).fillna(False).astype(bool)
+    ].copy()
+
+    if not revisoes_ativas.empty:
+        st.markdown("#### Histórico de tratativas no filtro atual")
+        cols = [
+            c
+            for c in [
+                "Data Operacional",
+                "OS_resultado",
+                "Consultor",
+                "Oficina",
+                "Tecnico_recurso",
+                "Razao_improdutiva",
+                "Classificacao_gerencial_MD",
+                "Razao_improdutiva_md",
+                "Justificativa_revisao_MD",
+                "Revisor_MD",
+            ]
+            if c in revisoes_ativas.columns
+        ]
+        st.dataframe(
+            revisoes_ativas[cols].rename(
+                columns={
+                    "OS_resultado": "OS",
+                    "Tecnico_recurso": "Técnico / recurso",
+                    "Razao_improdutiva": "Motivo OFS",
+                    "Classificacao_gerencial_MD": "Classificação MD",
+                    "Razao_improdutiva_md": "Motivo validado MD",
+                    "Justificativa_revisao_MD": "Justificativa",
+                    "Revisor_MD": "Revisor",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     # -----------------------------
     # DETALHAMENTO
