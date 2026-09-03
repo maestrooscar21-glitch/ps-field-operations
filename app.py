@@ -4370,7 +4370,9 @@ with st.sidebar:
         pagina = "🏢 Cadastro de Oficinas"
 
     st.divider()
-    st.caption("Versão 2.8.0 — Gestão separada de Estoque e Follow")
+    st.caption(
+        "Versão 2.8.3 — Painéis otimizados e memória de cálculo da MD"
+    )
 
 
 # =========================================================
@@ -5016,56 +5018,6 @@ elif pagina == "📊 Dashboard Executivo":
         ),
     )
 
-    st.divider()
-    esquerda, direita = st.columns(2)
-
-    with esquerda:
-        st.subheader("Classificação da data selecionada")
-
-        resumo = (
-            conciliacao_dia["Classificação"]
-            .value_counts()
-            .reset_index()
-        )
-        resumo.columns = ["Classificação", "Quantidade"]
-
-        grafico = px.bar(
-            resumo,
-            x="Quantidade",
-            y="Classificação",
-            orientation="h",
-            text="Quantidade",
-        )
-        grafico.update_layout(
-            showlegend=False,
-            height=480,
-        )
-        st.plotly_chart(
-            grafico,
-            use_container_width=True,
-        )
-
-    with direita:
-        st.subheader("Resumo da data selecionada")
-
-        st.metric(
-            "Atendimentos conciliados",
-            len(conciliacao_dia),
-        )
-        st.metric(
-            "Tickets",
-            contar_unicos(conciliacao_dia, "Ticket"),
-        )
-        st.metric(
-            "Oficinas",
-            contar_unicos(conciliacao_dia, "Oficina"),
-        )
-        st.metric(
-            "Consultores com atendimento",
-            contar_unicos(conciliacao_dia, "Consultor"),
-        )
-
-
 # =========================================================
 # PAINEL DO CONSULTOR
 # =========================================================
@@ -5470,104 +5422,6 @@ elif pagina == "👤 Painel do Consultor":
             f"{pd.to_datetime(data_selecionada).strftime('%d/%m/%Y')}"
         ),
     )
-
-    st.divider()
-    esquerda, direita = st.columns(2)
-
-    with esquerda:
-        st.subheader("Classificação do dia")
-
-        resumo = (
-            base_dia_consultor["Classificação"]
-            .value_counts()
-            .reset_index()
-        )
-        resumo.columns = ["Classificação", "Quantidade"]
-
-        grafico = px.bar(
-            resumo,
-            x="Quantidade",
-            y="Classificação",
-            orientation="h",
-            text="Quantidade",
-        )
-        grafico.update_layout(
-            showlegend=False,
-            height=480,
-        )
-        st.plotly_chart(
-            grafico,
-            use_container_width=True,
-        )
-
-    with direita:
-        st.subheader("Resumo operacional do dia")
-
-        st.metric(
-            "Tickets",
-            contar_unicos(base_dia_consultor, "Ticket"),
-        )
-        st.metric(
-            "Oficinas",
-            contar_unicos(base_dia_consultor, "Oficina"),
-        )
-        st.metric(
-            "Placas",
-            contar_unicos(base_dia_consultor, "Placa"),
-        )
-
-    # =====================================================
-    # RANKING CONSOLIDADO DAS OFICINAS DO CONSULTOR
-    # =====================================================
-
-    st.divider()
-    st.subheader("Ranking consolidado das oficinas")
-
-    linhas_ranking = []
-
-    for oficina, grupo in base_consolidada_consultor.groupby(
-        "Oficina",
-        dropna=False,
-    ):
-        ind = calcular_indicadores(grupo)
-
-        linhas_ranking.append(
-            {
-                "Oficina": texto_limpo(oficina) or "Não definida",
-                "Planejadas": ind["Planejadas"],
-                "Planejadas elegíveis MCI": ind["Planejadas elegíveis MCI"],
-                "Executadas": ind["Executadas planejadas"],
-                "Extras": ind["Executadas extras"],
-                "Improdutivas": ind["Improdutivas"],
-                "Improdutivas consideradas": ind["Improdutivas consideradas MD"],
-                "Expurgadas": ind["Improdutivas expurgadas"],
-                "OS_Perdidas": ind["OS Perdidas"],
-                "Canceladas": ind["Canceladas"],
-                "MCI (%)": ind["MCI"],
-                "MD (%)": ind["MD"],
-            }
-        )
-
-    ranking = pd.DataFrame(linhas_ranking)
-
-    if not ranking.empty:
-        ranking = ranking.sort_values(
-            ["Planejadas", "Oficina"],
-            ascending=[False, True],
-        )
-
-        ranking.insert(
-            0,
-            "Posição",
-            range(1, len(ranking) + 1),
-        )
-
-    st.dataframe(
-        ranking,
-        use_container_width=True,
-        hide_index=True,
-    )
-
 
 # =========================================================
 # CADASTRO DE OFICINAS
