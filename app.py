@@ -3784,6 +3784,119 @@ def preparar_diagnostico_md(base: pd.DataFrame) -> pd.DataFrame:
     return improdutivas
 
 
+def exibir_memoria_calculo_md(
+    base: pd.DataFrame,
+    indicadores: dict,
+    escopo: str,
+) -> None:
+    """Mostra de forma auditavel como o percentual da MD foi formado."""
+    improdutivas_totais = int(indicadores.get("Improdutivas", 0))
+    improdutivas_consideradas = int(
+        indicadores.get("Improdutivas consideradas MD", 0)
+    )
+    expurgadas = int(indicadores.get("Improdutivas expurgadas MD", 0))
+    reclassificadas = int(
+        indicadores.get("Improdutivas reclassificadas fora da MD", 0)
+    )
+    executadas_agendadas = int(
+        indicadores.get("Executadas planejadas", 0)
+    )
+    executadas_extras = int(indicadores.get("Executadas extras", 0))
+    base_md = (
+        executadas_agendadas
+        + executadas_extras
+        + improdutivas_consideradas
+    )
+
+    st.markdown("#### Memoria de calculo da MD")
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Improdutivas totais", improdutivas_totais)
+    m2.metric("Expurgadas por motivo", expurgadas)
+    m3.metric("Reclassificadas", reclassificadas)
+    m4.metric("Consideradas na MD", improdutivas_consideradas)
+    m5.metric("Base da MD", base_md)
+
+    st.info(
+        "MD = Improdutivas consideradas / "
+        "(Executadas agendadas + Execucoes extras + "
+        "Improdutivas consideradas) = "
+        f"{improdutivas_consideradas} / "
+        f"({executadas_agendadas} + {executadas_extras} + "
+        f"{improdutivas_consideradas}) = "
+        f"{indicadores.get('MD', 0):.1f}%"
+    )
+
+    mascara_expurgadas = mascara_improdutiva_expurgada_md(base)
+    classificacao_md = base.get(
+        "Classificacao_gerencial_MD",
+        pd.Series("Improdutiva", index=base.index),
+    ).fillna("Improdutiva")
+    mascara_reclassificadas = (
+        base.get(
+            "Classificação",
+            pd.Series("", index=base.index),
+        ).isin(["Improdutiva agendada", "Improdutiva extra"])
+        & classificacao_md.isin(
+            ["No-show técnico", "No-show cliente", "Cancelada"]
+        )
+    )
+    tabela_expurgadas = base[
+        mascara_expurgadas | mascara_reclassificadas
+    ].copy()
+
+    with st.expander(
+        f"Ver as {len(tabela_expurgadas)} OS retiradas/expurgadas da MD",
+        expanded=False,
+    ):
+        if tabela_expurgadas.empty:
+            st.info("Nenhuma OS expurgada neste periodo e filtro.")
+            return
+
+        tabela_expurgadas["Motivo usado na MD"] = tabela_expurgadas.get(
+            "Razao_improdutiva_md",
+            tabela_expurgadas.get(
+                "Razao_improdutiva",
+                pd.Series("", index=tabela_expurgadas.index),
+            ),
+        ).apply(texto_limpo)
+        tabela_expurgadas["Origem do expurgo"] = tabela_expurgadas.get(
+            "Revisao_MD",
+            pd.Series(False, index=tabela_expurgadas.index),
+        ).apply(
+            lambda valor: "Tratativa gerencial" if bool(valor) else "Regra automatica"
+        )
+        tabela_expurgadas["Decisão gerencial MD"] = tabela_expurgadas.get(
+            "Classificacao_gerencial_MD",
+            pd.Series("Improdutiva", index=tabela_expurgadas.index),
+        )
+
+        colunas = [
+            "Data Operacional",
+            "OS_resultado",
+            "Oficina",
+            "Consultor",
+            "Classificação",
+            "Razao_improdutiva",
+            "Motivo usado na MD",
+            "Decisão gerencial MD",
+            "Origem do expurgo",
+        ]
+        colunas = [c for c in colunas if c in tabela_expurgadas.columns]
+
+        st.dataframe(
+            tabela_expurgadas[colunas].rename(
+                columns={
+                    "OS_resultado": "OS",
+                    "Razao_improdutiva": "Motivo original OFS",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+            key=f"tabela_expurgadas_md_{escopo}",
+        )
+
+
 def resumo_motivos_md(improdutivas: pd.DataFrame) -> pd.DataFrame:
     if improdutivas.empty:
         return pd.DataFrame(columns=[
@@ -4706,6 +4819,12 @@ elif pagina == "📊 Dashboard Executivo":
                         indicadores_semana["Executadas extras"]
                     ),
                     "Improdutivas": indicadores_semana["Improdutivas"],
+                    "Expurgadas MD": indicadores_semana[
+                        "Improdutivas expurgadas MD"
+                    ],
+                    "Consideradas MD": indicadores_semana[
+                        "Improdutivas consideradas MD"
+                    ],
                     "OS Perdidas": indicadores_semana["OS Perdidas"],
                     "Canceladas": indicadores_semana["Canceladas"],
                     "MCI": indicadores_semana["MCI"],
@@ -4732,6 +4851,8 @@ elif pagina == "📊 Dashboard Executivo":
                 "Executadas agendadas",
                 "Executadas extras",
                 "Improdutivas",
+                "Expurgadas MD",
+                "Consideradas MD",
                 "OS Perdidas",
                 "Canceladas",
                 "MCI",
@@ -4822,6 +4943,15 @@ elif pagina == "📊 Dashboard Executivo":
         s8.metric(
             "Execuções extras",
             indicadores_sel["Executadas extras"],
+        )
+
+        exibir_memoria_calculo_md(
+            base_semana_sel,
+            indicadores_sel,
+            escopo=(
+                "executivo_"
+                + inicio_sel.strftime("%Y_%m_%d")
+            ),
         )
 
         exibir_detalhamento(
@@ -5111,6 +5241,12 @@ elif pagina == "👤 Painel do Consultor":
                         indicadores_semana["Executadas extras"]
                     ),
                     "Improdutivas": indicadores_semana["Improdutivas"],
+                    "Expurgadas MD": indicadores_semana[
+                        "Improdutivas expurgadas MD"
+                    ],
+                    "Consideradas MD": indicadores_semana[
+                        "Improdutivas consideradas MD"
+                    ],
                     "OS Perdidas": indicadores_semana["OS Perdidas"],
                     "Canceladas": indicadores_semana["Canceladas"],
                     "MCI": indicadores_semana["MCI"],
@@ -5138,6 +5274,8 @@ elif pagina == "👤 Painel do Consultor":
                     "Executadas agendadas",
                     "Executadas extras",
                     "Improdutivas",
+                    "Expurgadas MD",
+                    "Consideradas MD",
                     "OS Perdidas",
                     "Canceladas",
                     "MCI",
@@ -5244,6 +5382,17 @@ elif pagina == "👤 Painel do Consultor":
         sw8.metric(
             "Execuções extras",
             indicadores_semana_consultor["Executadas extras"],
+        )
+
+        exibir_memoria_calculo_md(
+            base_semana_consultor,
+            indicadores_semana_consultor,
+            escopo=(
+                "consultor_"
+                + normalizar_texto(consultor_selecionado)
+                + "_"
+                + inicio_consultor_sel.strftime("%Y_%m_%d")
+            ),
         )
 
         exibir_detalhamento(
