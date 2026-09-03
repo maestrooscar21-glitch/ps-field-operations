@@ -3788,6 +3788,7 @@ def exibir_memoria_calculo_md(
     base: pd.DataFrame,
     indicadores: dict,
     escopo: str,
+    modo_compacto: bool = False,
 ) -> None:
     """Mostra de forma auditavel como o percentual da MD foi formado."""
     improdutivas_totais = int(indicadores.get("Improdutivas", 0))
@@ -3808,24 +3809,42 @@ def exibir_memoria_calculo_md(
         + improdutivas_consideradas
     )
 
-    st.markdown("#### Memoria de calculo da MD")
+    st.markdown("#### Memória de cálculo da MD")
 
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Improdutivas totais", improdutivas_totais)
-    m2.metric("Expurgadas por motivo", expurgadas)
-    m3.metric("Reclassificadas", reclassificadas)
-    m4.metric("Consideradas na MD", improdutivas_consideradas)
-    m5.metric("Base da MD", base_md)
+    if modo_compacto:
+        executadas_md = executadas_agendadas + executadas_extras
+        c1, op1, c2, op2, c3, op3, c4 = st.columns(
+            [1.45, 0.25, 1.15, 0.25, 1.45, 0.25, 1.25]
+        )
+        c1.metric("Consideradas na MD", improdutivas_consideradas)
+        op1.markdown("## ÷")
+        c2.metric("Executadas", executadas_md)
+        op2.markdown("## +")
+        c3.metric("Consideradas na MD", improdutivas_consideradas)
+        op3.markdown("## =")
+        c4.metric("MD da semana", f"{indicadores.get('MD', 0):.1f}%")
+        st.caption(
+            f"Base da MD: {executadas_md} executadas + "
+            f"{improdutivas_consideradas} improdutiva(s) considerada(s) "
+            f"= {base_md} atendimento(s)."
+        )
+    else:
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Improdutivas totais", improdutivas_totais)
+        m2.metric("Expurgadas por motivo", expurgadas)
+        m3.metric("Reclassificadas", reclassificadas)
+        m4.metric("Consideradas na MD", improdutivas_consideradas)
+        m5.metric("Base da MD", base_md)
 
-    st.info(
-        "MD = Improdutivas consideradas / "
-        "(Executadas agendadas + Execucoes extras + "
-        "Improdutivas consideradas) = "
-        f"{improdutivas_consideradas} / "
-        f"({executadas_agendadas} + {executadas_extras} + "
-        f"{improdutivas_consideradas}) = "
-        f"{indicadores.get('MD', 0):.1f}%"
-    )
+        st.info(
+            "MD = Improdutivas consideradas / "
+            "(Executadas agendadas + Execuções extras + "
+            "Improdutivas consideradas) = "
+            f"{improdutivas_consideradas} / "
+            f"({executadas_agendadas} + {executadas_extras} + "
+            f"{improdutivas_consideradas}) = "
+            f"{indicadores.get('MD', 0):.1f}%"
+        )
 
     mascara_expurgadas = mascara_improdutiva_expurgada_md(base)
     classificacao_md = base.get(
@@ -4371,7 +4390,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.8.3 — Painéis otimizados e memória de cálculo da MD"
+        "Versão 2.8.4 — MD compacta no Painel do Consultor"
     )
 
 
@@ -5345,6 +5364,7 @@ elif pagina == "👤 Painel do Consultor":
                 + "_"
                 + inicio_consultor_sel.strftime("%Y_%m_%d")
             ),
+            modo_compacto=True,
         )
 
         exibir_detalhamento(
