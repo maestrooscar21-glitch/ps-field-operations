@@ -2730,6 +2730,30 @@ def listar_bases() -> pd.DataFrame:
     return pd.DataFrame(registros)
 
 
+def datas_completas_por_metadados(bases: pd.DataFrame) -> list[str]:
+    """Descobre datas completas sem varrer as tabelas operacionais."""
+    if bases is None or bases.empty:
+        return []
+
+    apoio = bases.copy()
+    if "tipo" not in apoio.columns or "data_operacional" not in apoio.columns:
+        return []
+
+    apoio["tipo"] = apoio["tipo"].apply(texto_limpo)
+    apoio["data_operacional"] = apoio["data_operacional"].apply(texto_limpo)
+
+    planejado = set(
+        apoio.loc[apoio["tipo"] == "planejado", "data_operacional"]
+    )
+    resultado = set(
+        apoio.loc[apoio["tipo"] == "resultado", "data_operacional"]
+    )
+
+    return sorted(
+        data for data in (planejado & resultado) if data
+    )
+
+
 @st.cache_data(ttl=CACHE_TTL_SEGUNDOS, show_spinner=False)
 def listar_datas_completas_reais() -> list[str]:
     """
@@ -4458,7 +4482,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.8.9 — Identificação completa das OS Perdidas"
+        "Versão 2.9.1 — Dashboards com carga seletiva"
     )
 
 
@@ -4799,13 +4823,47 @@ elif pagina == "📊 Dashboard Executivo":
         st.warning("Importe ao menos um planejado e um resultado.")
         st.stop()
 
-    datas_completas = listar_datas_completas_reais()
+    datas_disponiveis = datas_completas_por_metadados(bases)
 
-    if not datas_completas:
+    if not datas_disponiveis:
         st.warning(
             "Não existe uma data com planejado e resultado "
             "salvos juntos."
         )
+        st.stop()
+
+    data_min_exec = pd.to_datetime(min(datas_disponiveis)).date()
+    data_max_exec = pd.to_datetime(max(datas_disponiveis)).date()
+    inicio_padrao_exec = max(
+        data_min_exec,
+        data_max_exec - pd.Timedelta(days=6),
+    )
+    periodo_exec = date_input_persistente(
+        "Período do Dashboard Executivo",
+        value=(inicio_padrao_exec, data_max_exec),
+        min_value=data_min_exec,
+        max_value=data_max_exec,
+        key="periodo_dashboard_executivo_otimizado",
+    )
+    if isinstance(periodo_exec, (list, tuple)) and len(periodo_exec) == 2:
+        inicio_exec, fim_exec = periodo_exec
+    else:
+        inicio_exec = fim_exec = (
+            periodo_exec[0]
+            if isinstance(periodo_exec, (list, tuple))
+            else periodo_exec
+        )
+
+    datas_completas = [
+        data_operacional
+        for data_operacional in datas_disponiveis
+        if inicio_exec
+        <= pd.to_datetime(data_operacional).date()
+        <= fim_exec
+    ]
+
+    if not datas_completas:
+        st.info("Não existem bases completas no período selecionado.")
         st.stop()
 
     cadastro = carregar_oficinas()
@@ -5118,13 +5176,47 @@ elif pagina == "👤 Painel do Consultor":
         st.warning("Importe ao menos um planejado e um resultado.")
         st.stop()
 
-    datas_completas = listar_datas_completas_reais()
+    datas_disponiveis = datas_completas_por_metadados(bases)
 
-    if not datas_completas:
+    if not datas_disponiveis:
         st.warning(
             "Não existe uma data com planejado e resultado "
             "salvos juntos."
         )
+        st.stop()
+
+    data_min_cons = pd.to_datetime(min(datas_disponiveis)).date()
+    data_max_cons = pd.to_datetime(max(datas_disponiveis)).date()
+    inicio_padrao_cons = max(
+        data_min_cons,
+        data_max_cons - pd.Timedelta(days=6),
+    )
+    periodo_cons = date_input_persistente(
+        "Período do Painel do Consultor",
+        value=(inicio_padrao_cons, data_max_cons),
+        min_value=data_min_cons,
+        max_value=data_max_cons,
+        key="periodo_painel_consultor_otimizado",
+    )
+    if isinstance(periodo_cons, (list, tuple)) and len(periodo_cons) == 2:
+        inicio_cons, fim_cons = periodo_cons
+    else:
+        inicio_cons = fim_cons = (
+            periodo_cons[0]
+            if isinstance(periodo_cons, (list, tuple))
+            else periodo_cons
+        )
+
+    datas_completas = [
+        data_operacional
+        for data_operacional in datas_disponiveis
+        if inicio_cons
+        <= pd.to_datetime(data_operacional).date()
+        <= fim_cons
+    ]
+
+    if not datas_completas:
+        st.info("Não existem bases completas no período selecionado.")
         st.stop()
 
     cadastro = carregar_oficinas()
@@ -6051,7 +6143,10 @@ elif pagina == "📉 Dashboard de Improdutividade":
         st.warning("Não existem bases salvas para análise.")
         st.stop()
 
-    datas_completas = sorted(listar_datas_completas_reais())
+    # Usa a tabela leve de metadados para descobrir as datas completas.
+    # A versão anterior varria todas as linhas de Planejado e Resultado
+    # antes mesmo de exibir o filtro, causando a maior parte da demora.
+    datas_completas = datas_completas_por_metadados(bases)
 
     if not datas_completas:
         st.warning(
@@ -6059,8 +6154,66 @@ elif pagina == "📉 Dashboard de Improdutividade":
         )
         st.stop()
 
+    # -----------------------------
+    # FILTROS DE CARGA
+    # -----------------------------
+    st.markdown("### Filtros")
+
+    f1, f2 = st.columns(2)
+
+    data_min = pd.to_datetime(min(datas_completas)).date()
+    data_max = pd.to_datetime(max(datas_completas)).date()
+    inicio_padrao = max(
+        data_min,
+        data_max - pd.Timedelta(days=6),
+    )
+
+    with f1:
+        periodo = date_input_persistente(
+            "Período",
+            value=(inicio_padrao, data_max),
+            min_value=data_min,
+            max_value=data_max,
+            key="imp_periodo_otimizado",
+        )
+
+    with f2:
+        tipo = multiselect_persistente(
+            "Tipo de improdutiva",
+            [
+                "Improdutiva agendada",
+                "Improdutiva extra",
+            ],
+            default=[
+                "Improdutiva agendada",
+                "Improdutiva extra",
+            ],
+            key="imp_tipo",
+        )
+
+    if isinstance(periodo, (list, tuple)) and len(periodo) == 2:
+        inicio, fim = periodo
+    else:
+        inicio = fim = (
+            periodo[0]
+            if isinstance(periodo, (list, tuple))
+            else periodo
+        )
+
+    datas_selecionadas = [
+        data_operacional
+        for data_operacional in datas_completas
+        if inicio
+        <= pd.to_datetime(data_operacional).date()
+        <= fim
+    ]
+
+    if not datas_selecionadas:
+        st.info("Não existem bases completas no período selecionado.")
+        st.stop()
+
     cadastro = carregar_oficinas()
-    consolidado = carregar_consolidado(datas_completas)
+    consolidado = carregar_consolidado(datas_selecionadas)
 
     if consolidado.empty:
         st.warning("Não foi possível montar o histórico.")
@@ -6086,52 +6239,6 @@ elif pagina == "📉 Dashboard de Improdutividade":
     if improdutivas.empty:
         st.info("Não existem improdutivas no período armazenado.")
         st.stop()
-
-    # -----------------------------
-    # FILTROS
-    # -----------------------------
-    st.markdown("### Filtros")
-
-    f1, f2 = st.columns(2)
-
-    data_min = pd.to_datetime(
-        min(datas_completas)
-    ).date()
-    data_max = pd.to_datetime(
-        max(datas_completas)
-    ).date()
-
-    with f1:
-        periodo = date_input_persistente(
-            "Período",
-            value=(data_min, data_max),
-            min_value=data_min,
-            max_value=data_max,
-            key="imp_periodo",
-        )
-
-    with f2:
-        tipo = multiselect_persistente(
-            "Tipo de improdutiva",
-            [
-                "Improdutiva agendada",
-                "Improdutiva extra",
-            ],
-            default=[
-                "Improdutiva agendada",
-                "Improdutiva extra",
-            ],
-            key="imp_tipo",
-        )
-
-    if isinstance(periodo, (list, tuple)) and len(periodo) == 2:
-        inicio, fim = periodo
-    else:
-        inicio = fim = (
-            periodo[0]
-            if isinstance(periodo, (list, tuple))
-            else periodo
-        )
 
     datas_base = pd.to_datetime(
         improdutivas["Data Operacional"],
