@@ -341,7 +341,16 @@ def aplicar_revisoes_md(
         pd.Series("", index=resultado.index, dtype=str),
     ).apply(texto_limpo)
 
-    resultado["Classificacao_gerencial_MD"] = "Improdutiva"
+    resultado["Classificacao_gerencial_MD"] = resultado.get(
+        "Classificação",
+        pd.Series("Improdutiva", index=resultado.index, dtype=str),
+    ).apply(
+        lambda classificacao: (
+            "OS Perdida"
+            if texto_limpo(classificacao) == "OS Perdida"
+            else "Improdutiva"
+        )
+    )
     resultado["Revisao_MD"] = False
     resultado["Justificativa_revisao_MD"] = ""
     resultado["Revisor_MD"] = ""
@@ -369,9 +378,14 @@ def aplicar_revisoes_md(
         if revisao is None:
             continue
 
+        classificacao_padrao = (
+            "OS Perdida"
+            if texto_limpo(linha.get("Classificação", "")) == "OS Perdida"
+            else "Improdutiva"
+        )
         classificacao = (
             texto_limpo(revisao.get("classificacao_md", ""))
-            or "Improdutiva"
+            or classificacao_padrao
         )
         motivo = texto_limpo(
             revisao.get("motivo_md_revisado", "")
@@ -1433,6 +1447,34 @@ def mascara_improdutiva_expurgada_md(
 
 
 def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
+    # Preserva a classificação original. Somente OS Perdidas com revisão
+    # concluída podem assumir outra classificação nos indicadores.
+    classificacao_calculo = conciliacao["Classificação"].copy()
+    revisao_ativa = conciliacao.get(
+        "Revisao_MD",
+        pd.Series(False, index=conciliacao.index),
+    ).fillna(False).astype(bool)
+    classificacao_gerencial_calculo = conciliacao.get(
+        "Classificacao_gerencial_MD",
+        pd.Series("", index=conciliacao.index, dtype=str),
+    ).fillna("")
+    mascara_perdida_revisada = (
+        (classificacao_calculo == "OS Perdida")
+        & revisao_ativa
+    )
+    mapa_correcao_perdida = {
+        "Executada": "Executada agendada",
+        "Executada agendada": "Executada agendada",
+        "Cancelada": "Cancelada",
+        "Possível substituição de OS": "Possível substituição de OS",
+        "OS Perdida": "OS Perdida",
+    }
+    classificacao_calculo.loc[mascara_perdida_revisada] = (
+        classificacao_gerencial_calculo.loc[mascara_perdida_revisada]
+        .map(mapa_correcao_perdida)
+        .fillna("OS Perdida")
+    )
+
     # Fonte de verdade do denominador original:
     # toda OS reconhecida como parte da fotografia-base do planejamento.
     if "Origem Agendamento" in conciliacao.columns:
@@ -1454,21 +1496,21 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
             "Status intermediário agendado",
         }
         manutencoes_agendadas = int(
-            conciliacao["Classificação"].isin(
+            classificacao_calculo.isin(
                 agendadas_validas
             ).sum()
         )
 
     agendadas_executadas = int(
         (
-            conciliacao["Classificação"]
+            classificacao_calculo
             == "Executada agendada"
         ).sum()
     )
 
     executadas_extras = int(
         (
-            conciliacao["Classificação"]
+            classificacao_calculo
             == "Executada extra"
         ).sum()
     )
@@ -1568,14 +1610,14 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
 
     canceladas = int(
         (
-            conciliacao["Classificação"]
+            classificacao_calculo
             == "Cancelada"
         ).sum()
     )
 
     no_show = int(
         (
-            conciliacao["Classificação"]
+            classificacao_calculo
             == "OS Perdida"
         ).sum()
     )
@@ -1627,7 +1669,7 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         "OS Perdidas": no_show,
         "Possíveis substituições de OS": int(
             (
-                conciliacao["Classificação"]
+                classificacao_calculo
                 == "Possível substituição de OS"
             ).sum()
         ),
@@ -4390,7 +4432,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.8.5 — Improdutividade mais leve"
+        "Versão 2.8.7 — Tratativa de OS Perdidas"
     )
 
 
@@ -6603,9 +6645,21 @@ elif pagina == "📉 Dashboard de Improdutividade":
     planejado_ontem = carregar_base("planejado", data_ontem_iso)
     resultado_ontem = carregar_base("resultado", data_ontem_iso)
 
+    tipo_tratativa = st.radio(
+        "Tipo de ordem para tratar",
+        ["Improdutivas", "OS Perdidas", "Ambas"],
+        horizontal=True,
+        key="md_tipo_ordem_tratativa",
+        help=(
+            "OS Perdidas podem ser revisadas quando houver evidência de "
+            "execução, cancelamento ou substituição que não foi reconhecida "
+            "automaticamente pelo painel."
+        ),
+    )
+
     if resultado_ontem.empty:
         # Preserva o esquema esperado pela interface mesmo sem resultado D-1.
-        carteira_tratativa = improdutivas.iloc[0:0].copy()
+        carteira_tratativa = base.iloc[0:0].copy()
     else:
         # A tratativa parte do resultado D-1. O planejado e usado para
         # distinguir agendada de extra, mas a ausencia dele nao pode ocultar
@@ -6629,9 +6683,18 @@ elif pagina == "📉 Dashboard de Improdutividade":
                 cadastro,
             )
 
+        classificacoes_tratativa = {
+            "Improdutivas": ["Improdutiva agendada", "Improdutiva extra"],
+            "OS Perdidas": ["OS Perdida"],
+            "Ambas": [
+                "Improdutiva agendada",
+                "Improdutiva extra",
+                "OS Perdida",
+            ],
+        }
         carteira_tratativa = carteira_tratativa[
             carteira_tratativa["Classificação"].isin(
-                ["Improdutiva agendada", "Improdutiva extra"]
+                classificacoes_tratativa[tipo_tratativa]
             )
         ].copy()
 
@@ -6657,7 +6720,7 @@ elif pagina == "📉 Dashboard de Improdutividade":
     st.info(
         "Fila operacional de "
         f"{data_ontem.strftime('%d/%m/%Y')} (D-1): "
-        f"{len(carteira_tratativa)} OS improdutiva(s)."
+        f"{len(carteira_tratativa)} ordem(ns) em **{tipo_tratativa}**."
     )
 
     mascara_revisada = analise_revisao.get(
@@ -6787,6 +6850,15 @@ elif pagina == "📉 Dashboard de Improdutividade":
             analise_revisao["Rotulo_revisao"] == selecionada
         ].iloc[0]
 
+        classificacao_original = texto_limpo(
+            linha.get("Classificação", "")
+        )
+        classificacao_padrao = (
+            "OS Perdida"
+            if classificacao_original == "OS Perdida"
+            else "Improdutiva"
+        )
+
         c1, c2 = st.columns(2)
         with c1:
             st.markdown(
@@ -6834,21 +6906,29 @@ elif pagina == "📉 Dashboard de Improdutividade":
                     texto_limpo(
                         linha.get("Classificacao_gerencial_MD", "")
                     )
-                    or "Improdutiva"
+                    or classificacao_padrao
                 )
             )
 
-        classificacoes = [
-            "Improdutiva",
-            "No-show técnico",
-            "No-show cliente",
-            "Cancelada",
-        ]
+        if classificacao_original == "OS Perdida":
+            classificacoes = [
+                "OS Perdida",
+                "Executada",
+                "Cancelada",
+                "Possível substituição de OS",
+            ]
+        else:
+            classificacoes = [
+                "Improdutiva",
+                "No-show técnico",
+                "No-show cliente",
+                "Cancelada",
+            ]
         atual = (
             texto_limpo(
                 linha.get("Classificacao_gerencial_MD", "")
             )
-            or "Improdutiva"
+            or classificacao_padrao
         )
         idx = (
             classificacoes.index(atual)
@@ -6862,8 +6942,8 @@ elif pagina == "📉 Dashboard de Improdutividade":
             index=idx,
             disabled=(fila_status == "Revisadas"),
             help=(
-                "No-show técnico, No-show cliente e Cancelada retiram a OS "
-                "do universo da MD, mas não alteram o registro original."
+                "A revisão corrige os indicadores gerenciais sem alterar "
+                "o registro original importado do OFS."
             ),
             key=f"md_revisao_classificacao_{fila_status}",
         )
@@ -6918,9 +6998,9 @@ elif pagina == "📉 Dashboard de Improdutividade":
             )
         else:
             st.info(
-                f"Para a MD, esta OS está sendo tratada como "
-                f"**{classificacao_md}** e não compõe a improdutividade "
-                "do indicador."
+                f"Gerencialmente, esta OS será tratada como "
+                f"**{classificacao_md}**. O registro original do OFS "
+                "permanecerá preservado para auditoria."
             )
 
         justificativa = st.text_area(
