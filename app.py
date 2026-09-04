@@ -284,12 +284,28 @@ def salvar_revisao_md(
 ) -> None:
     cliente = exigir_supabase()
 
+    # Compatibilidade com a restrição histórica da tabela, criada quando
+    # a fila aceitava somente revisões de improdutividade. As novas decisões
+    # de OS Perdida são codificadas no campo de motivo e recuperadas pelo app.
+    prefixo_auditoria_perdida = "AUDITORIA_OS_PERDIDA::"
+    classificacoes_perdida = {
+        "OS Perdida",
+        "Executada",
+        "Possível substituição de OS",
+    }
+    classificacao_banco = classificacao_md
+    motivo_banco = motivo_md_revisado
+
+    if classificacao_md in classificacoes_perdida:
+        classificacao_banco = "Improdutiva"
+        motivo_banco = prefixo_auditoria_perdida + classificacao_md
+
     registro = {
         "data_operacional": data_operacional,
         "chave_atendimento": chave_atendimento,
         "motivo_original": motivo_original,
-        "classificacao_md": classificacao_md,
-        "motivo_md_revisado": motivo_md_revisado,
+        "classificacao_md": classificacao_banco,
+        "motivo_md_revisado": motivo_banco,
         "justificativa": justificativa,
         "revisor": revisor,
         "atualizado_em": datetime.now(FUSO_BRASIL).isoformat(),
@@ -383,13 +399,23 @@ def aplicar_revisoes_md(
             if texto_limpo(linha.get("Classificação", "")) == "OS Perdida"
             else "Improdutiva"
         )
-        classificacao = (
-            texto_limpo(revisao.get("classificacao_md", ""))
-            or classificacao_padrao
-        )
         motivo = texto_limpo(
             revisao.get("motivo_md_revisado", "")
         )
+        prefixo_auditoria_perdida = "AUDITORIA_OS_PERDIDA::"
+        classificacao_codificada = (
+            motivo[len(prefixo_auditoria_perdida):]
+            if motivo.startswith(prefixo_auditoria_perdida)
+            else ""
+        )
+        classificacao = (
+            classificacao_codificada
+            or texto_limpo(revisao.get("classificacao_md", ""))
+            or classificacao_padrao
+        )
+
+        if classificacao_codificada:
+            motivo = ""
 
         resultado.at[
             indice, "Classificacao_gerencial_MD"
@@ -4432,7 +4458,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.8.7 — Tratativa de OS Perdidas"
+        "Versão 2.8.9 — Identificação completa das OS Perdidas"
     )
 
 
@@ -6812,14 +6838,38 @@ elif pagina == "📉 Dashboard de Improdutividade":
             mascara_revisada
         ].copy()
 
-    analise_revisao["OS_exibir"] = analise_revisao[
-        "OS_resultado"
-    ].apply(lambda v: texto_limpo(v) or "Sem OS")
+    analise_revisao["OS_exibir"] = analise_revisao.apply(
+        lambda linha: (
+            texto_limpo(linha.get("OS_resultado", ""))
+            or texto_limpo(linha.get("OS_planejada", ""))
+            or "Sem OS informado"
+        ),
+        axis=1,
+    )
+
+    analise_revisao["Ticket_exibir"] = analise_revisao.apply(
+        lambda linha: (
+            texto_limpo(linha.get("Ticket_resultado", ""))
+            or texto_limpo(linha.get("Ticket_planejado", ""))
+            or "Sem ticket"
+        ),
+        axis=1,
+    )
+
+    analise_revisao["Placa_exibir"] = analise_revisao.apply(
+        lambda linha: (
+            texto_limpo(linha.get("Placa_resultado", ""))
+            or texto_limpo(linha.get("Placa_planejada", ""))
+            or "Sem placa"
+        ),
+        axis=1,
+    )
 
     analise_revisao["Rotulo_revisao"] = analise_revisao.apply(
         lambda linha: (
             f"{texto_limpo(linha.get('Data Operacional', ''))} | "
             f"OS {texto_limpo(linha.get('OS_exibir', ''))} | "
+            f"{texto_limpo(linha.get('Placa_exibir', ''))} | "
             f"{texto_limpo(linha.get('Tecnico_recurso', ''))} | "
             f"{texto_limpo(linha.get('Oficina', ''))}"
         ),
@@ -6861,6 +6911,12 @@ elif pagina == "📉 Dashboard de Improdutividade":
 
         c1, c2 = st.columns(2)
         with c1:
+            st.markdown(
+                "**Identificação planejada:**  \n"
+                f"OS {texto_limpo(linha.get('OS_exibir', ''))} · "
+                f"Ticket {texto_limpo(linha.get('Ticket_exibir', ''))} · "
+                f"Placa {texto_limpo(linha.get('Placa_exibir', ''))}"
+            )
             st.markdown(
                 "**Motivo OFS:**  \n"
                 + (
