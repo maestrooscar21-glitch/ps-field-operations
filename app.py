@@ -26,8 +26,9 @@ st.set_page_config(
 )
 
 
-# Cache global — precisa existir antes dos decorators
-CACHE_TTL_SEGUNDOS = 60
+# O cache permanece válido durante a sessão do servidor e só é limpo pelas
+# rotinas de escrita. Navegar entre páginas não deve disparar novas consultas.
+CACHE_TTL_SEGUNDOS = None
 
 CONSULTORES = [
     "Não definido",
@@ -94,6 +95,7 @@ DATA_CORTE_NOVA_REGRA = "2026-08-08"
 # SUPABASE
 # =========================================================
 
+@st.cache_resource(show_spinner=False)
 def obter_supabase() -> tuple[Client | None, str | None]:
     """Cria a conexão e devolve também uma mensagem de erro legível."""
     try:
@@ -4482,7 +4484,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.9.1 — Dashboards com carga seletiva"
+        "Versão 2.9.2 — Painéis congelados entre atualizações"
     )
 
 
