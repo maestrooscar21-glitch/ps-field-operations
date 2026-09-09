@@ -4484,7 +4484,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.9.2 — Painéis congelados entre atualizações"
+        "Versão 2.9.3 — Histórico da tratativa gerencial"
     )
 
 
@@ -6769,16 +6769,36 @@ elif pagina == "📉 Dashboard de Improdutividade":
         "contagens históricas continuam intactos."
     )
 
-    # A fila gerencial e uma rotina operacional D-1. Ela nao pode herdar
-    # o periodo nem os filtros de qualidade/conformidade do dashboard,
-    # pois isso fazia OS validas de ontem desaparecerem da tratativa.
+    # A fila abre em D-1, mas permite consultar uma data histórica por vez.
+    # Ela não herda o período nem os filtros de qualidade/conformidade do
+    # dashboard, evitando cargas históricas grandes e desaparecimento de OS.
     data_ontem = (
         datetime.now(FUSO_BRASIL) - pd.Timedelta(days=1)
     ).date()
 
+    datas_tratativa = sorted(datas_completas, reverse=True)
     data_ontem_iso = data_ontem.isoformat()
-    planejado_ontem = carregar_base("planejado", data_ontem_iso)
-    resultado_ontem = carregar_base("resultado", data_ontem_iso)
+    if data_ontem_iso in datas_tratativa:
+        datas_tratativa.remove(data_ontem_iso)
+        datas_tratativa.insert(0, data_ontem_iso)
+
+    data_tratativa_iso = selectbox_persistente(
+        "Data da fila gerencial",
+        datas_tratativa,
+        key="data_fila_gerencial_md",
+        format_func=lambda valor: (
+            pd.to_datetime(valor).strftime("%d/%m/%Y")
+            + (" — D-1" if valor == data_ontem_iso else "")
+        ),
+    )
+    data_tratativa = pd.to_datetime(data_tratativa_iso).date()
+
+    planejado_tratativa = carregar_base(
+        "planejado", data_tratativa_iso
+    )
+    resultado_tratativa = carregar_base(
+        "resultado", data_tratativa_iso
+    )
 
     tipo_tratativa = st.radio(
         "Tipo de ordem para tratar",
@@ -6792,21 +6812,21 @@ elif pagina == "📉 Dashboard de Improdutividade":
         ),
     )
 
-    if resultado_ontem.empty:
-        # Preserva o esquema esperado pela interface mesmo sem resultado D-1.
+    if resultado_tratativa.empty:
+        # Preserva o esquema esperado mesmo sem resultado na data escolhida.
         carteira_tratativa = base.iloc[0:0].copy()
     else:
-        # A tratativa parte do resultado D-1. O planejado e usado para
+        # A tratativa parte do resultado da data escolhida. O planejado é usado para
         # distinguir agendada de extra, mas a ausencia dele nao pode ocultar
-        # improdutivas que de fato constam no resultado de ontem.
+        # improdutivas que de fato constam no resultado.
         carteira_tratativa = conciliar_bases(
-            planejado_ontem,
-            resultado_ontem,
+            planejado_tratativa,
+            resultado_tratativa,
         )
         carteira_tratativa.insert(
             0,
             "Data Operacional",
-            data_ontem_iso,
+            data_tratativa_iso,
         )
         carteira_tratativa = aplicar_revisoes_md(
             carteira_tratativa
@@ -6854,7 +6874,8 @@ elif pagina == "📉 Dashboard de Improdutividade":
 
     st.info(
         "Fila operacional de "
-        f"{data_ontem.strftime('%d/%m/%Y')} (D-1): "
+        f"{data_tratativa.strftime('%d/%m/%Y')}"
+        f"{' (D-1)' if data_tratativa_iso == data_ontem_iso else ' (histórico)'}: "
         f"{len(carteira_tratativa)} ordem(ns) em **{tipo_tratativa}**."
     )
 
