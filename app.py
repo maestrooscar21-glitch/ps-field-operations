@@ -1407,11 +1407,33 @@ def motivo_expurgado_mci_md(valor) -> bool:
         "PROBLEMAS TECNICOS COM O VEICULO",
         "PROBLEMAS TECNICOS EM VEICULOS",
         "PROBLEMA TECNICO EM VEICULO",
+        # Aviso antecipado do cliente: não houve visita/deslocamento efetivo.
+        # A expressão curta cobre pequenas variações do texto padronizado do OFS,
+        # sem expurgar motivos genéricos como "cliente solicitou".
+        "CLIENTE INFORMOU COM ANTECEDENCIA",
     ]
 
     return any(
         motivo in texto
         for motivo in motivos_expurgados
+    )
+
+
+def motivo_problema_tecnico_veiculo(valor) -> bool:
+    """Identifica somente o expurgo ligado a problema técnico no veículo."""
+    texto = normalizar_texto(valor)
+    if not texto:
+        return False
+
+    return any(
+        motivo in texto
+        for motivo in [
+            "PROBLEMAS TECNICOS COM VEICULOS",
+            "PROBLEMA TECNICO COM VEICULO",
+            "PROBLEMAS TECNICOS COM O VEICULO",
+            "PROBLEMAS TECNICOS EM VEICULOS",
+            "PROBLEMA TECNICO EM VEICULO",
+        ]
     )
 
 
@@ -1663,7 +1685,7 @@ def calcular_indicadores(conciliacao: pd.DataFrame) -> dict:
         else 0.0
     )
 
-    # MD: as duas causas expurgadas não entram nem no numerador
+    # MD: as causas expurgadas não entram nem no numerador
     # nem no denominador da medida.
     base_md = (
         total_executadas
@@ -3541,7 +3563,8 @@ def exibir_cards_indicadores(
             "Fórmula vigente: (Agendadas executadas + Executadas extras) ÷ "
             "Planejadas elegíveis MCI × 100. Planejadas elegíveis MCI = "
             "Manutenções agendadas menos improdutivas agendadas com os motivos "
-            "'Problemas técnicos com sistemas' e 'Problemas técnicos com veículos'. "
+            "'Problemas técnicos com sistemas', 'Problemas técnicos com veículos' "
+            "e 'Cliente informou com antecedência a indisponibilidade'. "
             "Essas OS permanecem visíveis no painel de improdutividade, mas não "
             "penalizam a MCI."
         ),
@@ -3553,7 +3576,8 @@ def exibir_cards_indicadores(
             "Fórmula vigente: Improdutivas consideradas ÷ "
             "(Executadas agendadas + Executadas extras + Improdutivas consideradas) "
             "× 100. São expurgadas da MD as improdutivas com os motivos "
-            "'Problemas técnicos com sistemas' e 'Problemas técnicos com veículos'. "
+            "'Problemas técnicos com sistemas', 'Problemas técnicos com veículos' "
+            "e 'Cliente informou com antecedência a indisponibilidade'. "
             "As OS continuam visíveis no detalhamento. Quando houver revisão gerencial, somente a MD usa o motivo validado; o restante do sistema preserva o motivo original do OFS."
         ),
     )
@@ -3579,8 +3603,8 @@ def exibir_cards_indicadores(
         help=(
             "Usa a mesma base matemática da MCI. Fórmula: "
             "(Agendadas executadas + Executadas extras) ÷ Planejadas elegíveis MCI "
-            "× 100, após o expurgo das improdutivas agendadas por problemas "
-            "técnicos com sistemas e com veículos."
+            "× 100, após o expurgo das improdutivas agendadas pelos três motivos "
+            "previstos na regra vigente."
         ),
     )
 
@@ -3589,7 +3613,7 @@ def exibir_cards_indicadores(
             "ℹ️ Regra vigente: "
             f'{indicadores["Improdutivas expurgadas"]} improdutiva(s) '
             "foram mantidas no histórico/detalhamento, mas expurgadas de MCI/MD "
-            "por motivo técnico de sistema ou veículo."
+            "por motivo técnico de sistema/veículo ou aviso antecipado do cliente."
         )
 
 
@@ -4484,7 +4508,7 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.9.3 — Histórico da tratativa gerencial"
+        "Versão 2.9.4 — Expurgos e não conformidades por veículo"
     )
 
 
@@ -6445,7 +6469,7 @@ elif pagina == "📉 Dashboard de Improdutividade":
     st.markdown("#### 🚫 OS Expurgadas do MD")
     st.caption(
         "Lista auditável das improdutivas retiradas exclusivamente do cálculo "
-        "da MD pelos motivos técnicos previstos na regra vigente. Os mesmos "
+        "da MD pelos motivos previstos na regra vigente. Os mesmos "
         "filtros de período, tipo, consultor, oficina e técnico aplicados acima "
         "também valem para esta relação."
     )
@@ -6549,6 +6573,146 @@ elif pagina == "📉 Dashboard de Improdutividade":
             use_container_width=True,
             key="download_os_expurgadas_md",
         )
+
+    # =====================================================
+    # FOTOGRAFIA SEMANAL — PROBLEMA TÉCNICO COM VEÍCULO
+    # =====================================================
+    st.markdown("#### 🚗 Não conformidades — problema técnico com veículo")
+    st.caption(
+        "Fotografia do período selecionado para apoiar a abertura de não "
+        "conformidades. A lista reutiliza os dados já carregados nesta página, "
+        "não altera indicadores e não executa nova consulta."
+    )
+
+    motivo_veiculo = filtrada.get(
+        "Razao_improdutiva",
+        pd.Series("", index=filtrada.index, dtype=str),
+    ).fillna("")
+    ocorrencias_veiculo = filtrada[
+        motivo_veiculo.apply(motivo_problema_tecnico_veiculo)
+    ].copy()
+
+    if ocorrencias_veiculo.empty:
+        st.info(
+            "Nenhuma improdutiva por problema técnico com veículo foi "
+            "encontrada no período e nos filtros selecionados."
+        )
+    else:
+        cliente_origem = ocorrencias_veiculo.get(
+            "Cliente_resultado",
+            ocorrencias_veiculo.get(
+                "Cliente",
+                pd.Series("", index=ocorrencias_veiculo.index, dtype=str),
+            ),
+        ).fillna("").apply(texto_limpo)
+        ocorrencias_veiculo["Cliente NC"] = cliente_origem.replace(
+            "", "Cliente não informado"
+        )
+
+        resumo_clientes_nc = (
+            ocorrencias_veiculo
+            .groupby("Cliente NC", dropna=False)
+            .agg(
+                Ocorrências=("Cliente NC", "size"),
+                Placas=("Placa", lambda s: s.fillna("").astype(str).replace("", pd.NA).nunique()),
+                Chamados=("Ticket", lambda s: s.fillna("").astype(str).replace("", pd.NA).nunique()),
+            )
+            .reset_index()
+            .rename(columns={"Cliente NC": "Cliente"})
+            .sort_values(["Ocorrências", "Cliente"], ascending=[False, True])
+            .reset_index(drop=True)
+        )
+        resumo_clientes_nc["Recorrência"] = resumo_clientes_nc[
+            "Ocorrências"
+        ].apply(lambda qtd: "Sim" if int(qtd) >= 2 else "Não")
+
+        recorrentes = int((resumo_clientes_nc["Ocorrências"] >= 2).sum())
+        nc1, nc2, nc3 = st.columns(3)
+        nc1.metric("Ocorrências", len(ocorrencias_veiculo))
+        nc2.metric("Clientes", len(resumo_clientes_nc))
+        nc3.metric("Clientes recorrentes", recorrentes)
+
+        somente_recorrentes = st.toggle(
+            "Mostrar somente clientes com recorrência (2 ou mais)",
+            value=True,
+            key="imp_nc_somente_recorrentes",
+        )
+        clientes_nc = sorted(resumo_clientes_nc["Cliente"].astype(str).tolist())
+        clientes_nc_filtro = st.multiselect(
+            "Filtrar cliente para não conformidade",
+            clientes_nc,
+            key="imp_nc_clientes",
+        )
+
+        resumo_exibido = resumo_clientes_nc.copy()
+        if somente_recorrentes:
+            resumo_exibido = resumo_exibido[
+                resumo_exibido["Ocorrências"] >= 2
+            ].copy()
+        if clientes_nc_filtro:
+            resumo_exibido = resumo_exibido[
+                resumo_exibido["Cliente"].isin(clientes_nc_filtro)
+            ].copy()
+
+        if resumo_exibido.empty:
+            st.info("Nenhum cliente atende aos filtros de recorrência selecionados.")
+        else:
+            st.dataframe(
+                resumo_exibido,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        detalhe_clientes = (
+            clientes_nc_filtro
+            if clientes_nc_filtro
+            else resumo_exibido["Cliente"].astype(str).tolist()
+        )
+        detalhe_nc = ocorrencias_veiculo[
+            ocorrencias_veiculo["Cliente NC"].isin(detalhe_clientes)
+        ].copy()
+        colunas_nc = [
+            "Data Operacional", "Cliente NC", "Ticket", "Placa",
+            "OS_resultado", "Oficina", "Consultor", "Tecnico_recurso",
+            "Razao_improdutiva", "Observacao_tecnico_improdutiva",
+        ]
+        colunas_nc = [c for c in colunas_nc if c in detalhe_nc.columns]
+        detalhe_nc = detalhe_nc[colunas_nc].rename(
+            columns={
+                "Cliente NC": "Cliente",
+                "OS_resultado": "OS",
+                "Tecnico_recurso": "Técnico / Recurso",
+                "Razao_improdutiva": "Motivo OFS",
+                "Observacao_tecnico_improdutiva": "Observação do Técnico",
+            }
+        )
+        ordenacao_nc = [
+            c for c in ["Cliente", "Data Operacional", "Ticket"]
+            if c in detalhe_nc.columns
+        ]
+        if ordenacao_nc:
+            detalhe_nc = detalhe_nc.sort_values(ordenacao_nc, ascending=True)
+        detalhe_nc = detalhe_nc.reset_index(drop=True)
+
+        if not detalhe_nc.empty:
+            st.markdown("##### Placas e chamados")
+            st.dataframe(
+                detalhe_nc,
+                use_container_width=True,
+                hide_index=True,
+                height=360,
+            )
+            st.download_button(
+                "⬇️ Baixar fotografia para não conformidades",
+                data=dataframe_para_excel(detalhe_nc, "Problema veículo"),
+                file_name="nao_conformidades_problema_veiculo.xlsx",
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                use_container_width=True,
+                key="download_nc_problema_veiculo",
+            )
 
     st.markdown("#### 🏆 Oficinas com 0% de MD")
     positivas = oficinas_rank[
