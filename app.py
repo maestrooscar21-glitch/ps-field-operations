@@ -4477,6 +4477,7 @@ with st.sidebar:
                 "Consultor",
                 "Improdutividade",
                 "Pré-agenda",
+                "Eficiência OFS",
             ],
             key="nav_dashboard",
         )
@@ -4486,6 +4487,7 @@ with st.sidebar:
             "Consultor": "👤 Painel do Consultor",
             "Improdutividade": "📉 Dashboard de Improdutividade",
             "Pré-agenda": "🛰️ Controle Pré-Agenda",
+            "Eficiência OFS": "🎯 Eficiência do Agendamento OFS",
         }[subarea]
 
     elif area == "📥 Dados":
@@ -4508,15 +4510,177 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Versão 2.9.4 — Expurgos e não conformidades por veículo"
+        "Versão 2.9.5 — Eficiência OFS (auditoria experimental)"
     )
 
+
+
+# =========================================================
+# v2.9.5 — EFICIÊNCIA DO AGENDAMENTO OFS (LEITURA)
+# =========================================================
+
+@st.cache_data(ttl=900, show_spinner=False)
+def carregar_jornada_ofs(inicio: str, fim: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Consulta as três bases sem gravar ou modificar dados no Supabase."""
+    cliente = exigir_supabase()
+    def buscar_periodo(tabela: str, colunas: str) -> pd.DataFrame:
+        saida = []
+        pagina = 0
+        while True:
+            consulta = (cliente.table(tabela).select(colunas)
+                        .gte("data_operacional", inicio).lte("data_operacional", fim)
+                        .order("id").range(pagina * 1000, (pagina + 1) * 1000 - 1))
+            lote = consulta.execute().data or []
+            saida.extend(lote)
+            if len(lote) < 1000:
+                break
+            pagina += 1
+        return pd.DataFrame(saida)
+    return (
+        buscar_periodo("pre_agenda_aceite", "id,importacao_id,importado_em,data_operacional,chave_atendimento,os,placa,oficina,situacao_pre_agenda,motivo_rejeicao"),
+        buscar_periodo("atividades_planejadas", "id,data_operacional,chave_atendimento,os,placa,oficina,planejamento_base,primeira_aparicao,ultima_aparicao"),
+        buscar_periodo("atividades_resultado", "id,data_operacional,chave_atendimento,os,placa,oficina,status_atividade,criado_em"),
+    )
+
+
+def construir_jornada_ofs(pre: pd.DataFrame, planejado: pd.DataFrame,
+                          resultado: pd.DataFrame, fim_periodo: str,
+                          janela_dias: int = 30) -> pd.DataFrame:
+    """Conservador: evidência de importação não equivale ao horário do clique de aceite."""
+    if pre.empty:
+        return pd.DataFrame()
+    for df in (pre, planejado, resultado):
+        if df.empty:
+            continue
+        for col in ("os", "placa", "oficina", "chave_atendimento"):
+            if col not in df.columns:
+                df[col] = ""
+            df[col] = df[col].fillna("").astype(str).str.strip().str.upper()
+        df["data_operacional"] = pd.to_datetime(df["data_operacional"], errors="coerce")
+    pre = pre.copy()
+    pre["importado_em"] = pd.to_datetime(pre["importado_em"], utc=True, errors="coerce")
+    pre["rejeitada"] = pre["motivo_rejeicao"].fillna("").astype(str).str.strip().ne("") | (
+        pre["situacao_pre_agenda"].fillna("").str.contains("Rejeitada", case=False))
+    pre = pre.sort_values(["importado_em", "id"])
+    # Identidade preferencial da OS, sem confundir OS diferentes da mesma placa.
+    pre["identidade"] = pre["os"].where(pre["os"].ne(""), pre["chave_atendimento"])
+    pre = pre[pre["identidade"].ne("")]
+    if pre.empty:
+        return pd.DataFrame()
+    linhas = []
+    for (identidade, data), grupo in pre.groupby(["identidade", "data_operacional"], dropna=False, sort=False):
+        primeira = grupo.iloc[0]
+        ultima = grupo.iloc[-1]
+        os = primeira["os"]
+        placa = primeira["placa"]
+        rejeicoes = grupo[grupo["rejeitada"]]
+        rejeitada = not rejeicoes.empty
+        candidatos_p = planejado[(planejado["os"] == os) & (planejado["data_operacional"] == data)] if not planejado.empty and os else pd.DataFrame()
+        candidatos_r = resultado[(resultado["os"] == os) & (resultado["data_operacional"] == data)] if not resultado.empty and os else pd.DataFrame()
+        if candidatos_p.empty and not planejado.empty:
+            candidatos_p = planejado[(planejado["chave_atendimento"] == primeira["chave_atendimento"]) & (planejado["data_operacional"] == data)]
+        if candidatos_r.empty and not resultado.empty:
+            candidatos_r = resultado[(resultado["chave_atendimento"] == primeira["chave_atendimento"]) & (resultado["data_operacional"] == data)]
+        tem_programacao = not candidatos_p.empty
+        # Sem timestamps do aceite, só podemos inferir que houve aceite operacional.
+        status = "Sem resultado"
+        if not candidatos_r.empty:
+            status = str(candidatos_r.sort_values("id").iloc[-1]["status_atividade"] or "Sem resultado").strip().lower()
+        aceito_inferido = tem_programacao or status in ("concluído", "não concluído")
+        recuperacao = ""
+        os_recuperacao = ""
+        if rejeitada and placa and not resultado.empty and pd.notna(data):
+            posteriores = resultado[(resultado["placa"] == placa) &
+                (resultado["data_operacional"] >= data) &
+                (resultado["data_operacional"] <= data + pd.Timedelta(days=janela_dias)) &
+                (resultado["status_atividade"].fillna("").str.lower() == "concluído") &
+                (resultado["os"] != os)].sort_values("data_operacional")
+            if not posteriores.empty:
+                prox = posteriores.iloc[0]
+                recuperacao = "Possível recuperação (validar serviço)"
+                os_recuperacao = str(prox["os"])
+        if rejeitada:
+            etapa = "Rejeitada"
+        elif aceito_inferido:
+            etapa = "Programada / aceite operacional inferido"
+        else:
+            etapa = "Sem aceite identificado no follow"
+        if status == "concluído":
+            desfecho = "Concluída"
+        elif status == "não concluído":
+            desfecho = "Improdutiva"
+        elif status == "cancelado":
+            desfecho = "Cancelada"
+        else:
+            desfecho = "Sem desfecho confirmado"
+        linhas.append({
+            "Data": data, "OS": os or identidade, "Placa": placa,
+            "Oficina": str(ultima["oficina"]), "Entrada no follow": primeira["importado_em"],
+            "Rejeição observada": rejeitada, "Motivo rejeição": (
+                str(rejeicoes.iloc[0]["motivo_rejeicao"] or "") if rejeitada else ""),
+            "Programação identificada": tem_programacao,
+            "Aceite operacional inferido": aceito_inferido,
+            "Etapa": etapa, "Resultado da OS": desfecho,
+            "Recuperação posterior": recuperacao, "Outra OS": os_recuperacao,
+            "Jornada": " → ".join(x for x in ["No follow", etapa, desfecho] if x),
+        })
+    return pd.DataFrame(linhas)
+
+
+def exibir_eficiencia_agendamento_ofs() -> None:
+    exigir_supabase()
+    st.subheader("🎯 Eficiência do Agendamento OFS")
+    st.caption("Jornada observada nas importações. Aceite inferido pela programação/execução; o instante exato do clique não consta nas bases.")
+    hoje = date.today()
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        inicio = st.date_input("Início", value=hoje - pd.Timedelta(days=30), key="ef_inicio")
+    with c2:
+        fim = st.date_input("Fim", value=hoje, key="ef_fim")
+    with c3:
+        janela = st.selectbox("Busca de recuperação (dias)", [7, 15, 30], index=2, key="ef_janela")
+    if inicio > fim:
+        st.error("A data inicial não pode ser posterior à final.")
+        return
+    with st.spinner("Cruzando follow, programação e resultado..."):
+        pre, planejado, resultado = carregar_jornada_ofs(str(inicio), str(fim))
+        jornada = construir_jornada_ofs(pre, planejado, resultado, str(fim), janela)
+    if jornada.empty:
+        st.info("Nenhuma OS de pré-agenda localizada nesse intervalo.")
+        return
+    oficinas = sorted(x for x in jornada["Oficina"].dropna().unique() if x)
+    selecionadas = st.multiselect("Oficinas", oficinas, default=[], key="ef_oficinas", placeholder="Todas as oficinas")
+    if selecionadas:
+        jornada = jornada[jornada["Oficina"].isin(selecionadas)].copy()
+    total = len(jornada)
+    programadas = jornada["Aceite operacional inferido"].sum()
+    concluidas = ((jornada["Aceite operacional inferido"]) & (jornada["Resultado da OS"] == "Concluída")).sum()
+    canceladas = ((jornada["Aceite operacional inferido"]) & (jornada["Resultado da OS"] == "Cancelada")).sum()
+    rejeitadas = jornada["Rejeição observada"].sum()
+    recuperadas = (jornada["Recuperação posterior"] != "").sum()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("OS no follow", f"{total:,}".replace(",", "."))
+    c2.metric("Com programação / aceite inferido", f"{programadas:,}".replace(",", "."))
+    c3.metric("Programadas e concluídas", f"{concluidas:,}".replace(",", "."))
+    c4.metric("Programadas com cancelamento", f"{canceladas:,}".replace(",", "."))
+    st.caption(f"Conversão observada: {concluidas / programadas:.1%} das OS com programação/aceite inferido foram concluídas na mesma OS e data." if programadas else "Sem base para calcular conversão.")
+    c1, c2 = st.columns(2)
+    c1.metric("Rejeições observadas", f"{rejeitadas:,}".replace(",", "."))
+    c2.metric("Possíveis recuperações em outra OS", f"{recuperadas:,}".replace(",", "."))
+    st.warning("Atenção: os dados atuais não provam se o agendamento foi automático ou manual, nem a hora exata do aceite/cancelamento. A ordem da jornada é conceitual, não cronologia comprovada. Recuperações por placa são indícios, não conversões confirmadas. A busca de recuperação está limitada ao período filtrado. Não use estes percentuais para concluir superioridade de um fluxo sem validação da origem e do tipo de serviço.")
+    st.markdown("#### Linha do tempo por OS")
+    st.dataframe(jornada.sort_values(["Data", "OS"], ascending=[False, True]), use_container_width=True, hide_index=True)
+    st.download_button("⬇️ Exportar auditoria CSV", jornada.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="auditoria_eficiencia_ofs.csv", mime="text/csv")
 
 # =========================================================
 # IMPORTAÇÕES
 # =========================================================
 
-if pagina == "📥 Importações":
+if pagina == "🎯 Eficiência do Agendamento OFS":
+    exibir_eficiencia_agendamento_ofs()
+
+elif pagina == "📥 Importações":
     exigir_supabase()
 
     st.subheader("Importações permanentes")
