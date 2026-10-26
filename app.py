@@ -7924,7 +7924,61 @@ if pagina == "💰 Financeiro":
             st.caption(
                 "Prévia temporária. Nenhum dado foi gravado no Supabase."
             )
+            st.subheader("📊 Indicadores Financeiros — Janeiro")
 
+            colunas_valores = [
+                "Total a Pagar",
+                "Total Serviço Oficina",
+                "Total KM",
+                "Total Despesas Viagem"
+            ]
+
+            for coluna in colunas_valores:
+                if coluna in df_fin.columns:
+                    df_fin[coluna] = pd.to_numeric(
+                        df_fin[coluna], errors="coerce"
+                    ).fillna(0)
+
+            def moeda(valor):
+                return (
+                    f"R$ {valor:,.2f}"
+                    .replace(",", "X")
+                    .replace(".", ",")
+                    .replace("X", ".")
+                )
+
+            col1, col2 = st.columns(2)
+
+            if "Total a Pagar" in df_fin.columns:
+                col1.metric(
+                    "Total a Pagar",
+                    moeda(df_fin["Total a Pagar"].sum())
+                )
+
+            if "Total Serviço Oficina" in df_fin.columns:
+                col2.metric(
+                    "Serviços de Oficina",
+                    moeda(df_fin["Total Serviço Oficina"].sum())
+                )
+
+            col3, col4 = st.columns(2)
+
+            if "Total KM" in df_fin.columns:
+                col3.metric(
+                    "Deslocamentos",
+                    moeda(df_fin["Total KM"].sum())
+                )
+
+            if "Total Despesas Viagem" in df_fin.columns:
+                col4.metric(
+                    "Despesas de Viagem",
+                    moeda(df_fin["Total Despesas Viagem"].sum())
+                )
+
+            st.caption(
+                "Valores preliminares, sujeitos à conciliação. "
+                "Os componentes não são somados novamente ao Total a Pagar."
+            )
         except Exception as erro:
             st.error(f"Erro ao ler a planilha: {erro}")
 if pagina == "👷 Capacidade":
