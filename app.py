@@ -7823,8 +7823,67 @@ from marcos_modulos import (
 )
 if pagina == "🔁 Retrabalho":
     st.subheader("🔁 Análise de Retrabalho")
-    st.info(
-        "Módulo de retrabalho conectado. "
-        "Aguardando configuração da análise e validação dos dados."
-    )
+    st.caption("Pré-análise de reincidências — somente leitura")
+
+    if st.button("Consultar reincidências"):
+        with st.spinner("Consultando o Supabase..."):
+            registros = buscar_todos(
+                "atividades_resultado",
+                colunas="os,placa,data_operacional,tipo_atividade,oficina,status_atividade"
+            )
+
+            df = pd.DataFrame(registros)
+
+        if df.empty:
+            st.warning("Nenhum registro encontrado.")
+        else:
+            df["data_operacional"] = pd.to_datetime(
+                df["data_operacional"], errors="coerce"
+            )
+
+            df["placa"] = df["placa"].fillna("").astype(str).str.strip()
+            df["os"] = df["os"].fillna("").astype(str).str.strip()
+
+            df = df[
+                (df["placa"] != "") &
+                (df["os"] != "") &
+                df["data_operacional"].notna()
+            ]
+
+            df = df.drop_duplicates(
+                subset=["os", "placa", "data_operacional"]
+            ).sort_values(["placa", "data_operacional"])
+
+            df["os_anterior"] = df.groupby("placa")["os"].shift()
+            df["data_anterior"] = df.groupby("placa")["data_operacional"].shift()
+
+            df["dias_entre_os"] = (
+                df["data_operacional"] - df["data_anterior"]
+            ).dt.days
+
+            candidatos = df[
+                (df["os"] != df["os_anterior"]) &
+                df["dias_entre_os"].between(0, 90)
+            ].copy()
+
+            st.metric("Possíveis reincidências", len(candidatos))
+
+            st.warning(
+                "Estes são candidatos a reincidência, "
+                "não retrabalhos confirmados. "
+                "As regras de exclusão ainda serão aplicadas."
+            )
+
+            st.dataframe(
+                candidatos[
+                    [
+                        "placa", "os_anterior", "os",
+                        "data_anterior", "data_operacional",
+                        "dias_entre_os", "tipo_atividade",
+                        "oficina", "status_atividade"
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True
+            )
 
