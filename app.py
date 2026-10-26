@@ -7797,3 +7797,18 @@ elif pagina == "📉 Dashboard de Improdutividade":
         ),
         use_container_width=True,
     )
+    
+    
+# ============================================================
+# INTEGRAÇÃO DOS MÓDULOS DO PAINEL OFS
+# ============================================================
+
+from marcos_modulos import (
+    regras,
+    retrabalho,
+    financeiro,
+    capacidade,
+    eficiencia,
+    auditoria,
+)
+
