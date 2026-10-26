@@ -7979,6 +7979,34 @@ if pagina == "💰 Financeiro":
                 "Valores preliminares, sujeitos à conciliação. "
                 "Os componentes não são somados novamente ao Total a Pagar."
             )
+                        st.subheader("🏢 Custos por Oficina — Janeiro")
+
+            if "Oficina" in df_fin.columns:
+                resumo_oficinas = (
+                    df_fin.groupby("Oficina", dropna=False)
+                    .agg(
+                        Quantidade_OS=("Oficina", "size"),
+                        Total_a_Pagar=("Total a Pagar", "sum"),
+                        Servicos=("Total Serviço Oficina", "sum"),
+                        Deslocamentos=("Total KM", "sum"),
+                        Viagens=("Total Despesas Viagem", "sum")
+                    )
+                    .reset_index()
+                    .sort_values("Total_a_Pagar", ascending=False)
+                )
+
+                st.dataframe(
+                    resumo_oficinas,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                st.caption(
+                    "Custos agrupados por oficina. "
+                    "Dados temporários, sem gravação no Supabase."
+                )
+            else:
+                st.warning("Coluna Oficina não encontrada.")
         except Exception as erro:
             st.error(f"Erro ao ler a planilha: {erro}")
 if pagina == "👷 Capacidade":
