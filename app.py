@@ -8015,7 +8015,7 @@ if pagina == "💰 Financeiro":
                     resumo_oficinas["Oficina"].astype(str)
                     == oficina_selecionada
                 ]
-                st.dataframe(
+            st.dataframe(
                     resumo_exibido,
                     use_container_width=True,
                     hide_index=True
