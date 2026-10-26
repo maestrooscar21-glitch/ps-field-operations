@@ -4478,6 +4478,10 @@ with st.sidebar:
                 "Improdutividade",
                 "Pré-agenda",
                 "Eficiência OFS",
+                "Retrabalho",
+"Financeiro",
+"Capacidade",
+"Auditoria",
             ],
             key="nav_dashboard",
         )
@@ -4488,6 +4492,12 @@ with st.sidebar:
             "Improdutividade": "📉 Dashboard de Improdutividade",
             "Pré-agenda": "🛰️ Controle Pré-Agenda",
             "Eficiência OFS": "🎯 Eficiência do Agendamento OFS",
+            
+            "Retrabalho": "🔁 Retrabalho",
+            "Financeiro": "💰 Financeiro",
+            "Capacidade": "👷 Capacidade",
+            "Auditoria": "🔎 Auditoria",
+
         }[subarea]
 
     elif area == "📥 Dados":
