@@ -7979,7 +7979,7 @@ if pagina == "💰 Financeiro":
                 "Valores preliminares, sujeitos à conciliação. "
                 "Os componentes não são somados novamente ao Total a Pagar."
             )
-                        st.subheader("🏢 Custos por Oficina — Janeiro")
+            st.subheader("🏢 Custos por Oficina — Janeiro")
 
             if "Oficina" in df_fin.columns:
                 resumo_oficinas = (
