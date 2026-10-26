@@ -7889,4 +7889,7 @@ if pagina == "🔁 Retrabalho":
 if pagina == "💰 Financeiro":
     st.subheader("💰 Análise Financeira")
     st.info("Módulo financeiro conectado. Aguardando validação dos dados financeiros.")
+if pagina == "👷 Capacidade":
+    st.subheader("👷 Análise de Capacidade")
+    st.info("Módulo de capacidade conectado. Aguardando configuração dos indicadores.")
 
