@@ -7994,9 +7994,29 @@ if pagina == "💰 Financeiro":
                     .reset_index()
                     .sort_values("Total_a_Pagar", ascending=False)
                 )
+            oficinas_disponiveis = sorted(
+            resumo_oficinas["Oficina"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
 
+            oficina_selecionada = st.selectbox(
+                "Filtrar por oficina",
+                ["Todas as oficinas"] + oficinas_disponiveis,
+                key="filtro_oficina_financeiro"
+            )
+
+            if oficina_selecionada == "Todas as oficinas":
+                resumo_exibido = resumo_oficinas
+            else:
+                resumo_exibido = resumo_oficinas[
+                    resumo_oficinas["Oficina"].astype(str)
+                    == oficina_selecionada
+                ]
                 st.dataframe(
-                    resumo_oficinas,
+                    resumo_exibido,
                     use_container_width=True,
                     hide_index=True
                 )
