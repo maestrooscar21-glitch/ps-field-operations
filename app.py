@@ -7821,4 +7821,10 @@ from marcos_modulos import (
     eficiencia,
     auditoria,
 )
+if pagina == "🔁 Retrabalho":
+    st.subheader("🔁 Análise de Retrabalho")
+    st.info(
+        "Módulo de retrabalho conectado. "
+        "Aguardando configuração da análise e validação dos dados."
+    )
 
