@@ -7888,7 +7888,45 @@ if pagina == "🔁 Retrabalho":
             )
 if pagina == "💰 Financeiro":
     st.subheader("💰 Análise Financeira")
-    st.info("Módulo financeiro conectado. Aguardando validação dos dados financeiros.")
+    st.caption("Consolidado financeiro — janeiro de 2026")
+
+    arquivo = st.file_uploader(
+        "Selecione o consolidado financeiro de janeiro",
+        type=["xlsx"],
+        key="upload_financeiro"
+    )
+
+    if arquivo is not None:
+        try:
+            excel = pd.ExcelFile(arquivo)
+
+            aba = st.selectbox(
+                "Selecione a aba",
+                excel.sheet_names,
+                key="aba_financeiro"
+            )
+
+            df_fin = pd.read_excel(excel, sheet_name=aba)
+
+            st.success("Planilha carregada para conferência.")
+
+            col1, col2 = st.columns(2)
+            col1.metric("Linhas encontradas", len(df_fin))
+            col2.metric("Colunas encontradas", len(df_fin.columns))
+
+            st.subheader("Prévia dos dados")
+            st.dataframe(
+                df_fin.head(30),
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.caption(
+                "Prévia temporária. Nenhum dado foi gravado no Supabase."
+            )
+
+        except Exception as erro:
+            st.error(f"Erro ao ler a planilha: {erro}")
 if pagina == "👷 Capacidade":
     st.subheader("👷 Análise de Capacidade")
     st.info("Módulo de capacidade conectado. Aguardando configuração dos indicadores.")
