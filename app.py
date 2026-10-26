@@ -7886,7 +7886,7 @@ if pagina == "🔁 Retrabalho":
                 use_container_width=True,
                 hide_index=True
             )
-            if pagina == "💰 Financeiro":
-                st.subheader("💰 Análise Financeira")
-                st.info("Módulo financeiro conectado. Aguardando validação dos dados financeiros.")
+if pagina == "💰 Financeiro":
+    st.subheader("💰 Análise Financeira")
+    st.info("Módulo financeiro conectado. Aguardando validação dos dados financeiros.")
 
