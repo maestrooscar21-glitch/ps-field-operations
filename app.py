@@ -8042,6 +8042,25 @@ if pagina == "💰 Financeiro":
                     "Protocolos distintos",
                     detalhes_financeiros["Protocolo"].nunique()
                 )
+            
+            st.subheader("💰 Composição dos custos da oficina")
+
+            col_serv, col_km, col_viagem = st.columns(3)
+
+            col_serv.metric(
+            "Serviços",
+            moeda(df_detalhe["Total Serviço Oficina"].sum())
+            )
+
+            col_km.metric(
+            "Deslocamentos (KM)",
+            moeda(df_detalhe["Total KM"].sum())
+            )
+
+            col_viagem.metric(
+            "Despesas de viagem",
+            moeda(df_detalhe["Total Despesas Viagem"].sum())
+            )
 
             st.dataframe(
                 detalhes_financeiros,
