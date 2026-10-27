@@ -8020,7 +8020,34 @@ if pagina == "💰 Financeiro":
                     use_container_width=True,
                     hide_index=True
                 )
+            st.subheader("📋 Detalhamento financeiro por oficina")
 
+            if oficina_selecionada == "Todas as oficinas":
+                detalhes_financeiros = df_fin.copy()
+            else:
+                detalhes_financeiros = df_fin[
+                    df_fin["Oficina"].astype(str)
+                    == oficina_selecionada
+                ].copy()
+
+            col1, col2 = st.columns(2)
+
+            col1.metric(
+                "Registros financeiros",
+                len(detalhes_financeiros)
+            )
+
+            if "Protocolo" in detalhes_financeiros.columns:
+                col2.metric(
+                    "Protocolos distintos",
+                    detalhes_financeiros["Protocolo"].nunique()
+                )
+
+            st.dataframe(
+                detalhes_financeiros,
+                use_container_width=True,
+                hide_index=True
+            )
             st.caption(
                     "Custos agrupados por oficina. "
                     "Dados temporários, sem gravação no Supabase."
