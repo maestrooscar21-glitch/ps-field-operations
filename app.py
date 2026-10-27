@@ -8062,6 +8062,48 @@ if pagina == "💰 Financeiro":
                 )
             
             st.subheader("💰 Composição dos custos da oficina")
+            
+            st.subheader("📊 Custos por tipo de serviço — Janeiro")
+
+            comparativo_tipos = (
+                df_fin[
+                    df_fin["Oficina"].astype(str) == oficina_selecionada
+                ].copy()
+                if oficina_selecionada != "Todas as oficinas"
+                else df_fin.copy()
+            )
+
+            colunas_valores = [
+                "Total Serviço Oficina",
+                "Total KM",
+                "Total Despesas Viagem",
+                "Total a Pagar"
+            ]
+
+            for coluna in colunas_valores:
+                comparativo_tipos[coluna] = pd.to_numeric(
+                    comparativo_tipos[coluna],
+                    errors="coerce"
+                ).fillna(0)
+
+            resumo_tipos = (
+                comparativo_tipos.groupby("Tipo", dropna=False)
+                .agg(
+                    Quantidade_OS=("Tipo", "size"),
+                    Servicos=("Total Serviço Oficina", "sum"),
+                    KM=("Total KM", "sum"),
+                    Despesas=("Total Despesas Viagem", "sum"),
+                    Total=("Total a Pagar", "sum")
+            )
+            .reset_index()
+            .sort_values("Total", ascending=False)
+            )
+
+            st.dataframe(
+                resumo_tipos,
+                use_container_width=True,
+                hide_index=True
+            )
 
             col_serv, col_km, col_viagem = st.columns(3)
 
