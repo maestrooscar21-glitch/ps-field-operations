@@ -8055,7 +8055,7 @@ if pagina == "💰 Financeiro":
                 len(detalhes_financeiros)
             )
 
-if "Protocolo" in detalhes_financeiros.columns:
+            if "Protocolo" in detalhes_financeiros.columns:
                 col2.metric(
                     "Protocolos distintos",
                     detalhes_financeiros["Protocolo"].nunique()
