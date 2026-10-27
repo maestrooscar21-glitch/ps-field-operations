@@ -8099,12 +8099,6 @@ if pagina == "💰 Financeiro":
             .sort_values("Total", ascending=False)
             )
 
-            st.dataframe(
-                resumo_tipos,
-                use_container_width=True,
-                hide_index=True
-            )
-
             col_serv, col_km, col_viagem = st.columns(3)
 
             col_serv.metric(
@@ -8137,7 +8131,11 @@ if pagina == "💰 Financeiro":
             resumo_tipos["Media_Total_OS"] = (
                 resumo_tipos["Total"] / resumo_tipos["Quantidade_OS"]
             ).round(2)
-
+            st.dataframe(
+                resumo_tipos,
+                use_container_width=True,
+                hide_index=True
+            )
             st.dataframe(
                 detalhes_financeiros,
                 use_container_width=True,
