@@ -8025,8 +8025,6 @@ if pagina == "💰 Financeiro":
                     "Custos agrupados por oficina. "
                     "Dados temporários, sem gravação no Supabase."
                 )
-            else:
-                st.warning("Coluna Oficina não encontrada.")
         except Exception as erro:
             st.error(f"Erro ao ler a planilha: {erro}")
 if pagina == "👷 Capacidade":
