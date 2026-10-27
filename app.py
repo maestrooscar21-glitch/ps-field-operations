@@ -8049,17 +8049,17 @@ if pagina == "💰 Financeiro":
 
             col_serv.metric(
             "Serviços",
-            moeda(df_detalhes_financeiros["Total Serviço Oficina"].sum())
+            moeda(detalhes_financeiros["Total Serviço Oficina"].sum())
             )
 
             col_km.metric(
             "Deslocamentos (KM)",
-            moeda(df_detalhes_financeiros["Total KM"].sum())
+            moeda(detalhes_financeiros["Total KM"].sum())
             )
 
             col_viagem.metric(
             "Despesas de viagem",
-            moeda(df_detalhes_financeiros["Total Despesas Viagem"].sum())
+            moeda(detalhes_financeiros["Total Despesas Viagem"].sum())
             )
 
             st.dataframe(
