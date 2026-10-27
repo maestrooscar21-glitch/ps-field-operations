@@ -8122,6 +8122,22 @@ if pagina == "💰 Financeiro":
             moeda(detalhes_financeiros["Total Despesas Viagem"].sum())
             )
 
+            resumo_tipos["Media_Servicos_OS"] = (
+                resumo_tipos["Servicos"] / resumo_tipos["Quantidade_OS"]
+            ).round(2)
+
+            resumo_tipos["Media_KM_OS"] = (
+                resumo_tipos["KM"] / resumo_tipos["Quantidade_OS"]
+            ).round(2)
+
+            resumo_tipos["Media_Despesas_OS"] = (
+                resumo_tipos["Despesas"] / resumo_tipos["Quantidade_OS"]
+            ).round(2)
+
+            resumo_tipos["Media_Total_OS"] = (
+                resumo_tipos["Total"] / resumo_tipos["Quantidade_OS"]
+            ).round(2)
+
             st.dataframe(
                 detalhes_financeiros,
                 use_container_width=True,
