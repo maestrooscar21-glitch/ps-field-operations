@@ -8029,7 +8029,25 @@ if pagina == "💰 Financeiro":
                     df_fin["Oficina"].astype(str)
                     == oficina_selecionada
                 ].copy()
+            tipos_disponiveis = sorted(
+                detalhes_financeiros["Tipo"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
 
+            tipo_selecionado = st.selectbox(
+                "Filtrar por tipo de serviço",
+                ["Todos os serviços"] + tipos_disponiveis,
+                key="filtro_tipo_financeiro"
+            )
+
+            if tipo_selecionado != "Todos os serviços":
+                detalhes_financeiros = detalhes_financeiros[
+                    detalhes_financeiros["Tipo"].astype(str)
+                    == tipo_selecionado
+                ].copy()
             col1, col2 = st.columns(2)
 
             col1.metric(
@@ -8037,7 +8055,7 @@ if pagina == "💰 Financeiro":
                 len(detalhes_financeiros)
             )
 
-            if "Protocolo" in detalhes_financeiros.columns:
+if "Protocolo" in detalhes_financeiros.columns:
                 col2.metric(
                     "Protocolos distintos",
                     detalhes_financeiros["Protocolo"].nunique()
