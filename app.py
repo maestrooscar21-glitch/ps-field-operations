@@ -8021,7 +8021,7 @@ if pagina == "💰 Financeiro":
                     hide_index=True
                 )
 
-                st.caption(
+            st.caption(
                     "Custos agrupados por oficina. "
                     "Dados temporários, sem gravação no Supabase."
                 )
